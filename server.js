@@ -28,7 +28,8 @@ const server = http.createServer(app);
 // ===================== WebSocket לטוויליו =====================
 
 // Twilio יחובר לנתיב הזה כ-Media Stream WebSocket
-const wss = new WebSocket.Server({ server, path: '/twilio-media-stream' });
+const wss = new WebSocket.Server({ server, path: '/twilio-media' });
+
 
 console.log('✅ MisterBot Realtime bridge starting up...');
 
