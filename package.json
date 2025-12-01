@@ -1,0 +1,18 @@
+{
+  "name": "misterbot-realtime",
+  "version": "1.0.0",
+  "description": "Realtime WebSocket server for MisterBot + Twilio Voice Streaming + OpenAI",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.15.1",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "openai": "^4.57.0"
+  }
+}
