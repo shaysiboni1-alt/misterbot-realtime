@@ -6,10 +6,10 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 
-// משתני סביבה – מגיעים מ-Render Environment Group
+// משתני סביבה – מגיעים מ-Render Environment Group שיצרנו
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// שומרים גם את ElevenLabs, לשימוש עתידי
+// שומרים גם את ElevenLabs, אבל עדיין לא משתמשים בהם בשלב הזה
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 
@@ -27,8 +27,8 @@ const server = http.createServer(app);
 
 // ===================== WebSocket לטוויליו =====================
 
-// שים לב: הנתיב חייב להתאים ל-<Stream url="wss://.../twilio-media">
-const wss = new WebSocket.Server({ server, path: '/twilio-media' });
+// Twilio יחובר לנתיב הזה כ-Media Stream WebSocket
+const wss = new WebSocket.Server({ server, path: '/twilio-media-stream' });
 
 console.log('✅ MisterBot Realtime bridge starting up...');
 
@@ -39,7 +39,7 @@ wss.on('connection', (twilioWs) => {
   let openaiWs = null;
   let openaiReady = false;
 
-  // ---------- מחברים ל-OpenAI Realtime ----------
+  // ---------- פותחים חיבור ל-OpenAI Realtime ----------
   function connectToOpenAI() {
     console.log('🔌 Connecting to OpenAI Realtime...');
 
@@ -57,22 +57,23 @@ wss.on('connection', (twilioWs) => {
       console.log('✅ OpenAI Realtime connected');
       openaiReady = true;
 
-      // מגדירים את הסשן: אודיו g711-ulaw (תואם Twilio), VAD בצד השרת
+      // מגדירים את הסשן: אודיו g711_ulaw (תואם Twilio), ו-VAD בצד השרת
       const sessionUpdate = {
         type: 'session.update',
         session: {
           instructions: `
-אתם עוזר קולי בשם "נטע" עבור שירות האוטומציה לעסקים "MisterBot".
-דברו תמיד בעברית, בלשון רבים (אתם), בטון נעים, קצר וענייני.
-נהלו שיחה טבעית: ברכו את המתקשר, הסבירו בקצרה מי אתם,
-ושאלו איך אפשר לעזור. אפשר לשאול שאלות המשך קצרות כשצריך.
-ענו רק על נושאים שקשורים לבוטים קוליים, וואטסאפ בוטים, קביעת תורים,
-מענה טלפוני לעסקים ועוד. הימנעו מלענות על נושאים שלא קשורים.
+אתם עוזר קולי בשם "נטע" עבור שירות אוטומציה לעסקים "MisterBot".
+דברו תמיד בעברית, בפנייה בלשון רבים (אתכם), בטון נעים, קצר וענייני.
+עשו שיחה טבעית, עם שאלות המשך קצרות כשצריך, וענו על שאלות כלליות על בוטים קוליים,
+קביעת תורים, מענה לעסקים ועוד.
           `.trim(),
           voice: 'alloy',
           modalities: ['audio', 'text'],
-          input_audio_format: 'g711-ulaw',
-          output_audio_format: 'g711-ulaw',
+
+          // 🔴 תיקון חשוב: השם הנכון הוא g711_ulaw (עם קו תחתי)
+          input_audio_format: 'g711_ulaw',
+          output_audio_format: 'g711_ulaw',
+
           input_audio_transcription: {
             model: 'whisper-1',
           },
@@ -88,17 +89,6 @@ wss.on('connection', (twilioWs) => {
 
       openaiWs.send(JSON.stringify(sessionUpdate));
       console.log('🧠 OpenAI session.update sent');
-
-      // 🔊 שלב חשוב: מבקשים מהמודל תגובת פתיחה – אחרת הוא שותק
-      const greeting = {
-        type: 'response.create',
-        response: {
-          instructions:
-            'פתחי בשיחת פתיחה קצרה בעברית, הציגי את עצמך כ"נטע ממיסטרבוט" ושאלי איך אפשר לעזור לעסק שלהם.',
-        },
-      };
-      openaiWs.send(JSON.stringify(greeting));
-      console.log('👋 OpenAI greeting response.create sent');
     });
 
     openaiWs.on('message', (data) => {
@@ -110,10 +100,12 @@ wss.on('connection', (twilioWs) => {
         return;
       }
 
-      // למעקב – אפשר לפתוח/לסגור לפי הצורך
-      // console.log('🔁 OpenAI event:', msg.type);
+      // נפתח לוג קצר כדי לוודא שמגיע אודיו חזרה
+      if (msg.type === 'response.audio.delta') {
+        console.log('🔊 OpenAI sent audio delta');
+      }
 
-      // שולחים אודיו חזרה לטוויליו
+      // שולחים אודיו החוצה לטוויליו
       if (
         msg.type === 'response.audio.delta' &&
         msg.delta &&
@@ -124,19 +116,17 @@ wss.on('connection', (twilioWs) => {
           event: 'media',
           streamSid,
           media: {
-            // OpenAI מחזיר base64 של g711-ulaw – בדיוק מה שטוויליו מצפה לקבל
+            // OpenAI מחזיר base64 של g711_ulaw – מתאים בדיוק למה שטוויליו רוצה
             payload: msg.delta,
           },
         };
         twilioWs.send(JSON.stringify(twilioMediaMsg));
       }
 
-      // לוג כשתגובה הסתיימה
       if (msg.type === 'response.completed') {
         console.log('✅ OpenAI response completed');
       }
 
-      // תמלול מלא של מה שהלקוח אמר
       if (msg.type === 'conversation.item.input_audio_transcription.completed') {
         const transcript = msg.transcript;
         if (transcript) {
@@ -144,8 +134,8 @@ wss.on('connection', (twilioWs) => {
         }
       }
 
-      // טקסט חלקי של תשובת הבוט (רק ללוג, לא חובה)
       if (msg.type === 'response.output_text.delta' && msg.delta) {
+        // אופציונלי: טקסט חלקי של תשובת הבוט
         // console.log('🧾 Bot partial:', msg.delta);
       }
     });
@@ -161,7 +151,7 @@ wss.on('connection', (twilioWs) => {
     });
   }
 
-  // מחברים ל-OpenAI מיד כשהחיבור של טוויליו נפתח
+  // מחברים לאופן-איי מיד כשהחיבור של טוויליו נפתח
   connectToOpenAI();
 
   // ---------- הודעות נכנסות מטוויליו ----------
@@ -182,16 +172,10 @@ wss.on('connection', (twilioWs) => {
     }
 
     if (event === 'media') {
-      // פה מגיע אודיו מהלקוח (base64 של g711-ulaw)
+      // פה מגיע אודיו מהלקוח (base64 של g711_ulaw)
       const payload = data.media.payload;
-      // לוג קל שנדע שמדיה באמת זורמת
-      console.log('🎧 Twilio media frame received');
 
-      if (
-        openaiWs &&
-        openaiReady &&
-        openaiWs.readyState === WebSocket.OPEN
-      ) {
+      if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
         const openaiAudioMsg = {
           type: 'input.audio_buffer.append',
           audio: payload,
