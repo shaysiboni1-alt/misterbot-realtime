@@ -1,23 +1,20 @@
 // server.js
 // MisterBot <-> Twilio <-> OpenAI Realtime bridge (אודיו בזמן אמת)
 
-// ===================== SETUP בסיסי =====================
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 
-// משתני סביבה – מגיעים מ-Render Environment Group שיצרנו
+// === משתני סביבה (מגיעים מ-Render Environment Group) ===
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-
-// שומרים גם את ElevenLabs, אבל עדיין לא משתמשים בהם בשלב הזה
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;   // לשימוש עתידי
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID; // לשימוש עתידי
 
 if (!OPENAI_API_KEY) {
   console.error('❌ OPENAI_API_KEY is missing! Make sure it is set in Render env.');
 }
 
-// אפליקציית Express בסיסית
+// === אפליקציית Express בסיסית ===
 const app = express();
 app.get('/', (req, res) => {
   res.send('MisterBot realtime server is running.');
@@ -25,9 +22,7 @@ app.get('/', (req, res) => {
 
 const server = http.createServer(app);
 
-// ===================== WebSocket לטוויליו =====================
-
-// Twilio יחובר לנתיב הזה כ-Media Stream WebSocket
+// === WebSocket לטוויליו (Media Streams) ===
 const wss = new WebSocket.Server({ server, path: '/twilio-media-stream' });
 
 console.log('✅ MisterBot Realtime bridge starting up...');
@@ -39,7 +34,7 @@ wss.on('connection', (twilioWs) => {
   let openaiWs = null;
   let openaiReady = false;
 
-  // ---------- פותחים חיבור ל-OpenAI Realtime ----------
+  // ---------- חיבור ל-OpenAI Realtime ----------
   function connectToOpenAI() {
     console.log('🔌 Connecting to OpenAI Realtime...');
 
@@ -57,23 +52,20 @@ wss.on('connection', (twilioWs) => {
       console.log('✅ OpenAI Realtime connected');
       openaiReady = true;
 
-      // מגדירים את הסשן: אודיו g711_ulaw (תואם Twilio), ו-VAD בצד השרת
+      // הגדרת סשן – שים לב: g711_ulaw (עם קו תחתון!)
       const sessionUpdate = {
         type: 'session.update',
         session: {
           instructions: `
 אתם עוזר קולי בשם "נטע" עבור שירות אוטומציה לעסקים "MisterBot".
-דברו תמיד בעברית, בפנייה בלשון רבים (אתכם), בטון נעים, קצר וענייני.
+דברו תמיד בעברית, בלשון רבים (אתכם), בטון נעים, קצר וענייני.
 עשו שיחה טבעית, עם שאלות המשך קצרות כשצריך, וענו על שאלות כלליות על בוטים קוליים,
 קביעת תורים, מענה לעסקים ועוד.
           `.trim(),
           voice: 'alloy',
           modalities: ['audio', 'text'],
-
-          // 🔴 תיקון חשוב: השם הנכון הוא g711_ulaw (עם קו תחתי)
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
-
           input_audio_transcription: {
             model: 'whisper-1',
           },
@@ -89,6 +81,16 @@ wss.on('connection', (twilioWs) => {
 
       openaiWs.send(JSON.stringify(sessionUpdate));
       console.log('🧠 OpenAI session.update sent');
+
+      // ברגע החיבור – אפשר לתת לברזנטציה של נטע לפתוח את השיחה
+      const hello = {
+        type: 'response.create',
+        response: {
+          instructions: 'תפתחי את השיחה בהצגה קצרה של נטע מ-MisterBot ותשאלי איך אפשר לעזור.',
+        },
+      };
+      openaiWs.send(JSON.stringify(hello));
+      console.log('👋 Sent initial greeting request');
     });
 
     openaiWs.on('message', (data) => {
@@ -100,12 +102,7 @@ wss.on('connection', (twilioWs) => {
         return;
       }
 
-      // נפתח לוג קצר כדי לוודא שמגיע אודיו חזרה
-      if (msg.type === 'response.audio.delta') {
-        console.log('🔊 OpenAI sent audio delta');
-      }
-
-      // שולחים אודיו החוצה לטוויליו
+      // שולחים אודיו מהמודל לטוויליו
       if (
         msg.type === 'response.audio.delta' &&
         msg.delta &&
@@ -116,7 +113,7 @@ wss.on('connection', (twilioWs) => {
           event: 'media',
           streamSid,
           media: {
-            // OpenAI מחזיר base64 של g711_ulaw – מתאים בדיוק למה שטוויליו רוצה
+            // OpenAI מחזיר base64 של g711_ulaw – זה בדיוק מה שטוויליו מצפה לו
             payload: msg.delta,
           },
         };
@@ -133,11 +130,6 @@ wss.on('connection', (twilioWs) => {
           console.log('👂 User said:', transcript);
         }
       }
-
-      if (msg.type === 'response.output_text.delta' && msg.delta) {
-        // אופציונלי: טקסט חלקי של תשובת הבוט
-        // console.log('🧾 Bot partial:', msg.delta);
-      }
     });
 
     openaiWs.on('close', () => {
@@ -151,10 +143,10 @@ wss.on('connection', (twilioWs) => {
     });
   }
 
-  // מחברים לאופן-איי מיד כשהחיבור של טוויליו נפתח
+  // מחברים ל-OpenAI מיד כשיש חיבור מטוויליו
   connectToOpenAI();
 
-  // ---------- הודעות נכנסות מטוויליו ----------
+  // ---------- הודעות מטוויליו ----------
   twilioWs.on('message', (msg) => {
     let data;
     try {
@@ -172,7 +164,7 @@ wss.on('connection', (twilioWs) => {
     }
 
     if (event === 'media') {
-      // פה מגיע אודיו מהלקוח (base64 של g711_ulaw)
+      // אודיו מהלקוח (base64 g711_ulaw)
       const payload = data.media.payload;
 
       if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
@@ -213,7 +205,7 @@ wss.on('connection', (twilioWs) => {
   });
 });
 
-// ===================== RUN SERVER =====================
+// === RUN SERVER ===
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
   console.log(`🚀 MisterBot Realtime server listening on port ${PORT}`);
