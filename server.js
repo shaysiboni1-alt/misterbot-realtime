@@ -49,7 +49,7 @@ wss.on('connection', (twilioWs) => {
       console.log('✅ OpenAI Realtime connected');
       openaiReady = true;
 
-      // הגדרת session: עברית, g711-ulaw, VAD בצד השרת
+      // הגדרת session: עברית, g711_ulaw, VAD בצד השרת
       const sessionUpdate = {
         type: 'session.update',
         session: {
@@ -61,8 +61,11 @@ wss.on('connection', (twilioWs) => {
           `.trim(),
           voice: 'alloy',
           modalities: ['audio', 'text'],
-          input_audio_format: 'g711-ulaw',
-          output_audio_format: 'g711-ulaw',
+
+          // כאן התיקון: שימוש ב-g711_ulaw (קו תחתון)
+          input_audio_format: 'g711_ulaw',
+          output_audio_format: 'g711_ulaw',
+
           input_audio_transcription: {
             model: 'whisper-1',
           },
@@ -79,7 +82,7 @@ wss.on('connection', (twilioWs) => {
       openaiWs.send(JSON.stringify(sessionUpdate));
       console.log('🧠 OpenAI session.update sent');
 
-      // ברכת פתיחה אוטומטית – כדי לוודא שיש אודיו חוזר
+      // ברכת פתיחה אוטומטית
       const greeting = {
         type: 'response.create',
         response: {
@@ -102,9 +105,6 @@ wss.on('connection', (twilioWs) => {
         return;
       }
 
-      // לוג בסיסי לדעת מה קורה
-      // console.log('🧠 OpenAI event:', msg.type);
-
       // אודיו מהבוט ← אל טוויליו
       if (
         msg.type === 'response.audio.delta' &&
@@ -116,11 +116,9 @@ wss.on('connection', (twilioWs) => {
           event: 'media',
           streamSid,
           media: {
-            payload: msg.delta, // base64 g711-ulaw
+            payload: msg.delta, // base64 g711_ulaw
           },
         };
-        // לוג לצורך דיבוג
-        // console.log('🎧 Sending audio chunk to Twilio, size:', msg.delta.length);
         twilioWs.send(JSON.stringify(twilioMediaMsg));
       }
 
@@ -172,13 +170,13 @@ wss.on('connection', (twilioWs) => {
     }
 
     if (event === 'media') {
-      // אודיו מהלקוח (base64 g711-ulaw)
+      // אודיו מהלקוח (base64 g711_ulaw)
       const payload = data.media && data.media.payload;
       if (!payload) return;
 
       if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
         const openaiAudioMsg = {
-          type: 'input_audio_buffer.append', // שים לב: עם _
+          type: 'input_audio_buffer.append',
           audio: payload,
         };
         openaiWs.send(JSON.stringify(openaiAudioMsg));
