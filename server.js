@@ -15,21 +15,12 @@ const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
 // ספק ה-TTS: openai (כמו היום) או eleven (ElevenLabs)
 const TTS_PROVIDER = (process.env.TTS_PROVIDER || 'openai').toLowerCase();
 
-// ElevenLabs TTS (תמיכה גם במפתחות הישנים ELEVENLABS_*)
-const ELEVEN_API_KEY =
-  process.env.ELEVEN_API_KEY || process.env.ELEVENLABS_API_KEY || '';
-const ELEVEN_VOICE_ID =
-  process.env.ELEVEN_VOICE_ID || process.env.ELEVENLABS_VOICE_ID || '';
-const ELEVEN_MODEL_ID =
-  process.env.ELEVEN_MODEL_ID || 'eleven_multilingual_v2';
-const ELEVEN_OPTIMIZE_STREAMING = parseInt(
-  process.env.ELEVEN_OPTIMIZE_STREAMING || '2',
-  10
-);
-const ELEVEN_OUTPUT_FORMAT =
-  process.env.ELEVEN_OUTPUT_FORMAT ||
-  process.env.ELEVENLABS_OUTPUT_FORMAT ||
-  'ulaw_8000';
+// ElevenLabs TTS
+const ELEVEN_API_KEY = process.env.ELEVENLABS_API_KEY || process.env.ELEVEN_API_KEY || '';
+const ELEVEN_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || process.env.ELEVEN_VOICE_ID || '';
+const ELEVEN_MODEL_ID = process.env.ELEVEN_MODEL_ID || 'eleven_multilingual_v2';
+const ELEVEN_OPTIMIZE_STREAMING = parseInt(process.env.ELEVEN_OPTIMIZE_STREAMING || '2', 10);
+const ELEVEN_OUTPUT_FORMAT = process.env.ELEVEN_OUTPUT_FORMAT || 'ulaw_8000';
 
 // --- שמות הבוט / העסק (עם תאימות לשמות ישנים) ---
 const BOT_NAME =
@@ -66,7 +57,7 @@ const LANGUAGES = (process.env.MB_LANGUAGES || 'he,en,ru')
 // מהירות "לוגית" (נשתמש בהוראה בפרומפט, לא פרמטר טכני במודל)
 const SPEECH_SPEED = parseFloat(process.env.MB_SPEECH_SPEED || '1.15'); // 1.0 = רגיל
 
-// שליטה ב-Voice וב-VAD (מהירות תגובה/רגישות) - לקול של OpenAI
+// שליטה ב-Voice וב-VAD (מהירות תגובה/רגישות)
 const OPENAI_VOICE = process.env.OPENAI_VOICE || 'alloy';
 
 // ברירת מחדל עדינה יותר לרעש רקע: threshold 0.4, silence 800ms
@@ -149,21 +140,22 @@ const MAX_WARN_BEFORE_MS = parseInt(
   10
 );
 
-// =============== בדיקות התחלתיות ===============
+// =============== בדיקת מפתח ===============
 if (!OPENAI_API_KEY) {
   console.error(
     '❌ OPENAI_API_KEY is missing! Make sure it is set in Render env.'
   );
 }
 
-console.log('🎙️ TTS provider set to:', TTS_PROVIDER);
+// לוג מידע על ספק TTS
+console.log(`🔊 TTS provider from env: ${TTS_PROVIDER}`);
 if (TTS_PROVIDER === 'eleven') {
   if (!ELEVEN_API_KEY || !ELEVEN_VOICE_ID) {
-    console.error(
-      '❌ ElevenLabs env missing: ELEVEN_API_KEY/ELEVENLABS_API_KEY or ELEVEN_VOICE_ID/ELEVENLABS_VOICE_ID'
-    );
+    console.warn('⚠️ Eleven selected but ELEVEN API key / VOICE ID missing – using OpenAI audio as fallback.');
   } else {
-    console.log('🔑 ElevenLabs config OK. Model:', ELEVEN_MODEL_ID, 'Format:', ELEVEN_OUTPUT_FORMAT);
+    console.log(
+      `🔑 ElevenLabs config OK. Model: ${ELEVEN_MODEL_ID} Format: ${ELEVEN_OUTPUT_FORMAT}`
+    );
   }
 }
 
@@ -216,15 +208,12 @@ function sendAudioToTwilio(streamSid, twilioWs, base64Audio) {
 async function ttsWithEleven(text) {
   if (!text) return null;
   if (!ELEVEN_API_KEY || !ELEVEN_VOICE_ID) {
-    console.error('❌ ELEVEN_API_KEY or ELEVEN_VOICE_ID missing - cannot call Eleven TTS');
+    console.error('❌ ELEVEN_API_KEY or ELEVEN_VOICE_ID missing');
     return null;
   }
 
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}?output_format=${encodeURIComponent(
-    ELEVEN_OUTPUT_FORMAT
-  )}&optimize_streaming_latency=${ELEVEN_OPTIMIZE_STREAMING}`;
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}?output_format=${ELEVEN_OUTPUT_FORMAT}&optimize_streaming_latency=${ELEVEN_OPTIMIZE_STREAMING}`;
 
-  console.log('🎧 Eleven TTS generating audio...');
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -239,15 +228,13 @@ async function ttsWithEleven(text) {
     });
 
     if (!res.ok) {
-      const errText = await res.text();
-      console.error('❌ Eleven TTS HTTP error:', res.status, errText);
+      console.error('❌ Eleven TTS HTTP error:', res.status, await res.text());
       return null;
     }
 
     const arrayBuffer = await res.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     const base64Audio = buffer.toString('base64');
-    console.log('✅ Eleven TTS audio ready, bytes:', buffer.length);
     return base64Audio;
   } catch (err) {
     console.error('❌ Eleven TTS fetch failed:', err.message || err);
@@ -313,14 +300,14 @@ function extractLeadFields(conversationLog) {
     }
   }
 
-  // מחפש שם (שמי ..., קוראים לי ... , אני ...)
+  // מחפש שם (שמי ..., קוראים לי ...)
   let contactName = '';
   for (let i = userTexts.length - 1; i >= 0 && !contactName; i--) {
     const txt = userTexts[i];
     let m =
       txt.match(/שמי\s+([^\s,]+(?:\s+[^\s,]+)?)/) ||
       txt.match(/קוראים לי\s+([^\s,]+(?:\s+[^\s,]+)?)/) ||
-      txt.match(/אני\s+([^\s,]+(?:\s+[^\s,]+)?)/);
+      txt.match(/אני\s+([^\ס,]+(?:\s+[^\ס,]+)?)/);
     if (m && m[1]) {
       contactName = m[1].trim();
     }
@@ -390,6 +377,17 @@ wss.on('connection', (twilioWs) => {
   let callSid = null;
   let openaiWs = null;
   let openaiReady = false;
+
+  // האם אנחנו מנסים להשתמש ב-Eleven לשיחה הזו
+  let elevenEnabled = (TTS_PROVIDER === 'eleven' && ELEVEN_API_KEY && ELEVEN_VOICE_ID);
+  // אם Eleven נכשל פעם אחת – נעבור לקול Alloy של OpenAI לשאר השיחה
+  let elevenFailed = !elevenEnabled; // אם אין קונפיג → מיד fallback
+
+  if (elevenEnabled) {
+    console.log('🎙 Using ElevenLabs TTS for this call (with fallback to OpenAI).');
+  } else {
+    console.log('🎙 Using OpenAI audio (Alloy) for this call.');
+  }
 
   // ניהול זמן שיחה / שקט
   const callStartTs = Date.now();
@@ -524,7 +522,7 @@ ${ENABLE_LEAD_CAPTURE ? `
         session: {
           instructions: finalSystemPrompt,
           voice: OPENAI_VOICE,
-          modalities: ['audio', 'text'], // מקבלים גם טקסט וגם אודיו (אודיו נשתמש רק אם provider=openai)
+          modalities: ['audio', 'text'],
 
           // חשוב: פורמט שתואם לטוויליו (מה שעבד לנו)
           input_audio_format: 'g711_ulaw',
@@ -672,22 +670,18 @@ ${CLOSING_SCRIPT}
         return;
       }
 
-      // אודיו מהבוט → טוויליו (רק אם ספק ה-TTS הוא OpenAI)
+      // אודיו מהבוט → טוויליו
+      // אם Eleven פעיל ולא נכשל – אנחנו מתעלמים מהאודיו של OpenAI
+      // ברגע ש-Eleven נכשל → elevenFailed=true ואז נתחיל להעביר את האודיו של OpenAI (Alloy)
       if (
-        TTS_PROVIDER === 'openai' &&
         msg.type === 'response.audio.delta' &&
-        msg.delta &&
         streamSid &&
         twilioWs.readyState === WebSocket.OPEN
       ) {
-        const twilioMediaMsg = {
-          event: 'media',
-          streamSid,
-          media: {
-            payload: msg.delta, // base64 g711_ulaw
-          },
-        };
-        twilioWs.send(JSON.stringify(twilioMediaMsg));
+        if (!elevenEnabled || elevenFailed) {
+          // שימוש בקול Alloy של OpenAI
+          sendAudioToTwilio(streamSid, twilioWs, msg.delta);
+        }
       }
 
       // תמלול מלא של מה שהלקוח אמר
@@ -718,42 +712,62 @@ ${CLOSING_SCRIPT}
         }
       }
 
-      // טקסט תשובת הבוט – מתוך response.completed (API החדש)
-      if (msg.type === 'response.completed' && msg.response && Array.isArray(msg.response.output)) {
-        const outputs = msg.response.output;
-        const textParts = [];
+      // טקסט תשובת הבוט – לוג + TTS חיצוני (Eleven)
+      if (
+        msg.type === 'response.output_text.delta' ||
+        msg.type === 'response.output_text.done'
+      ) {
+        let contentArray = null;
 
-        for (const out of outputs) {
-          if (out.type === 'output_text' && Array.isArray(out.content)) {
-            for (const c of out.content) {
-              if (
-                (c.type === 'output_text' || c.type === 'text') &&
-                (c.text || c.output_text)
-              ) {
-                textParts.push(c.text || c.output_text);
-              }
+        if (msg.type === 'response.output_text.delta' && msg.delta?.content) {
+          // פורמט Delta: msg.delta.content
+          contentArray = msg.delta.content;
+        } else if (msg.type === 'response.output_text.done') {
+          // פורמט Done: או output[0].content או output.content
+          if (Array.isArray(msg.output)) {
+            contentArray = msg.output[0]?.content || null;
+          } else if (msg.output?.content) {
+            contentArray = msg.output.content;
+          }
+        }
+
+        if (Array.isArray(contentArray)) {
+          const textParts = contentArray
+            .filter((p) => p.type === 'output_text' || p.type === 'text')
+            .map((p) => p.text || p.output_text || '')
+            .filter(Boolean);
+
+          if (textParts.length) {
+            const botText = textParts.join(' ');
+            console.log('🤖 Bot said:', botText);
+            conversationLog.push({ from: 'bot', text: botText });
+
+            // במצב Eleven – כשהטקסט הושלם, מייצרים אודיו דרך Eleven ושולחים לטוויליו
+            if (
+              elevenEnabled &&
+              !elevenFailed &&
+              msg.type === 'response.output_text.done'
+            ) {
+              ttsWithEleven(botText)
+                .then((base64Audio) => {
+                  if (!base64Audio) {
+                    console.error('❌ Eleven returned no audio – switching to OpenAI audio (Alloy) for rest of call.');
+                    elevenFailed = true;
+                    return;
+                  }
+                  sendAudioToTwilio(streamSid, twilioWs, base64Audio);
+                })
+                .catch((err) => {
+                  console.error('❌ Eleven TTS error:', err.message || err);
+                  console.error('➡️ Switching to OpenAI audio (Alloy) for rest of call.');
+                  elevenFailed = true;
+                });
             }
           }
         }
+      }
 
-        if (textParts.length) {
-          const botText = textParts.join(' ');
-          console.log('🤖 Bot said:', botText);
-          conversationLog.push({ from: 'bot', text: botText });
-
-          // במצב Eleven – אחרי שיש טקסט מלא, מייצרים אודיו דרך Eleven ושולחים לטוויליו
-          if (TTS_PROVIDER === 'eleven') {
-            ttsWithEleven(botText)
-              .then((base64Audio) => {
-                if (!base64Audio) return;
-                sendAudioToTwilio(streamSid, twilioWs, base64Audio);
-              })
-              .catch((err) => {
-                console.error('❌ Eleven TTS error:', err.message || err);
-              });
-          }
-        }
-
+      if (msg.type === 'response.completed') {
         console.log('✅ OpenAI response completed');
       }
 
