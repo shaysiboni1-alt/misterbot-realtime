@@ -12,6 +12,17 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || '';
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
 
+// ספק ה-TTS: openai (כמו היום) או eleven (ElevenLabs)
+const TTS_PROVIDER = (process.env.TTS_PROVIDER || 'openai').toLowerCase();
+
+// ElevenLabs TTS
+const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY || '';
+const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || '';
+const ELEVEN_MODEL_ID =
+  process.env.ELEVEN_MODEL_ID || 'eleven_multilingual_v2';
+const ELEVEN_OPTIMIZE_STREAMING =
+  parseInt(process.env.ELEVEN_OPTIMIZE_STREAMING || '2', 10);
+
 // --- שמות הבוט / העסק (עם תאימות לשמות ישנים) ---
 const BOT_NAME =
   process.env.MB_BOT_NAME ||
@@ -166,6 +177,60 @@ async function postToWebhook(url, body) {
   }
 }
 
+// שליחת אודיו (base64 g711_ulaw) לטוויליו
+function sendAudioToTwilio(streamSid, twilioWs, base64Audio) {
+  if (!streamSid) return;
+  if (!twilioWs || twilioWs.readyState !== WebSocket.OPEN) return;
+  if (!base64Audio) return;
+
+  const twilioMediaMsg = {
+    event: 'media',
+    streamSid,
+    media: {
+      payload: base64Audio,
+    },
+  };
+  twilioWs.send(JSON.stringify(twilioMediaMsg));
+}
+
+// קריאה ל-ElevenLabs כדי להמיר טקסט לאודיו בפורמט שמתאים לטוויליו
+async function ttsWithEleven(text) {
+  if (!text) return null;
+  if (!ELEVEN_API_KEY || !ELEVEN_VOICE_ID) {
+    console.error('❌ ELEVEN_API_KEY or ELEVEN_VOICE_ID missing');
+    return null;
+  }
+
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}?output_format=ulaw_8000&optimize_streaming_latency=${ELEVEN_OPTIMIZE_STREAMING}`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'xi-api-key': ELEVEN_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text,
+        model_id: ELEVEN_MODEL_ID,
+      }),
+    });
+
+    if (!res.ok) {
+      console.error('❌ Eleven TTS HTTP error:', res.status, await res.text());
+      return null;
+    }
+
+    const arrayBuffer = await res.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const base64Audio = buffer.toString('base64');
+    return base64Audio;
+  } catch (err) {
+    console.error('❌ Eleven TTS fetch failed:', err.message || err);
+    return null;
+  }
+}
+
 // זיהוי "פרידה" מהלקוח לפי הטקסט
 function isGoodbye(text) {
   if (!text) return false;
@@ -231,7 +296,7 @@ function extractLeadFields(conversationLog) {
     let m =
       txt.match(/שמי\s+([^\s,]+(?:\s+[^\s,]+)?)/) ||
       txt.match(/קוראים לי\s+([^\s,]+(?:\s+[^\s,]+)?)/) ||
-      txt.match(/אני\s+([^\s,]+(?:\s+[^\s,]+)?)/);
+      txt.match(/אני\s+([^\ס,]+(?:\s+[^\s,]+)?)/);
     if (m && m[1]) {
       contactName = m[1].trim();
     }
@@ -583,8 +648,9 @@ ${CLOSING_SCRIPT}
         return;
       }
 
-      // אודיו מהבוט → טוויליו
+      // אודיו מהבוט → טוויליו (רק אם ספק ה-TTS הוא OpenAI)
       if (
+        TTS_PROVIDER === 'openai' &&
         msg.type === 'response.audio.delta' &&
         msg.delta &&
         streamSid &&
@@ -628,7 +694,7 @@ ${CLOSING_SCRIPT}
         }
       }
 
-      // טקסט תשובת הבוט – לוג
+      // טקסט תשובת הבוט – לוג + TTS חיצוני (Eleven)
       if (
         (msg.type === 'response.output_text.done' ||
           msg.type === 'response.output_text.delta') &&
@@ -644,6 +710,18 @@ ${CLOSING_SCRIPT}
           const botText = textParts.join(' ');
           console.log('🤖 Bot said:', botText);
           conversationLog.push({ from: 'bot', text: botText });
+
+          // במצב Eleven – כשהטקסט הושלם, מייצרים אודיו דרך Eleven ושולחים לטוויליו
+          if (TTS_PROVIDER === 'eleven' && msg.type === 'response.output_text.done') {
+            ttsWithEleven(botText)
+              .then((base64Audio) => {
+                if (!base64Audio) return;
+                sendAudioToTwilio(streamSid, twilioWs, base64Audio);
+              })
+              .catch((err) => {
+                console.error('❌ Eleven TTS error:', err.message || err);
+              });
+          }
         }
       }
 
