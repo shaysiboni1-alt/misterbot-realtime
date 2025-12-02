@@ -12,6 +12,25 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || '';
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
 
+// ספק ה-TTS: openai (כמו היום) או eleven (ElevenLabs)
+const TTS_PROVIDER = (process.env.TTS_PROVIDER || 'openai').toLowerCase();
+
+// ElevenLabs TTS (תמיכה גם במפתחות הישנים ELEVENLABS_*)
+const ELEVEN_API_KEY =
+  process.env.ELEVEN_API_KEY || process.env.ELEVENLABS_API_KEY || '';
+const ELEVEN_VOICE_ID =
+  process.env.ELEVEN_VOICE_ID || process.env.ELEVENLABS_VOICE_ID || '';
+const ELEVEN_MODEL_ID =
+  process.env.ELEVEN_MODEL_ID || 'eleven_multilingual_v2';
+const ELEVEN_OPTIMIZE_STREAMING = parseInt(
+  process.env.ELEVEN_OPTIMIZE_STREAMING || '2',
+  10
+);
+const ELEVEN_OUTPUT_FORMAT =
+  process.env.ELEVEN_OUTPUT_FORMAT ||
+  process.env.ELEVENLABS_OUTPUT_FORMAT ||
+  'ulaw_8000';
+
 // --- שמות הבוט / העסק (עם תאימות לשמות ישנים) ---
 const BOT_NAME =
   process.env.MB_BOT_NAME ||
@@ -47,7 +66,7 @@ const LANGUAGES = (process.env.MB_LANGUAGES || 'he,en,ru')
 // מהירות "לוגית" (נשתמש בהוראה בפרומפט, לא פרמטר טכני במודל)
 const SPEECH_SPEED = parseFloat(process.env.MB_SPEECH_SPEED || '1.15'); // 1.0 = רגיל
 
-// שליטה ב-Voice וב-VAD (מהירות תגובה/רגישות)
+// שליטה ב-Voice וב-VAD (מהירות תגובה/רגישות) - לקול של OpenAI
 const OPENAI_VOICE = process.env.OPENAI_VOICE || 'alloy';
 
 // ברירת מחדל עדינה יותר לרעש רקע: threshold 0.4, silence 800ms
@@ -130,11 +149,22 @@ const MAX_WARN_BEFORE_MS = parseInt(
   10
 );
 
-// =============== בדיקת מפתח ===============
+// =============== בדיקות התחלתיות ===============
 if (!OPENAI_API_KEY) {
   console.error(
     '❌ OPENAI_API_KEY is missing! Make sure it is set in Render env.'
   );
+}
+
+console.log('🎙️ TTS provider set to:', TTS_PROVIDER);
+if (TTS_PROVIDER === 'eleven') {
+  if (!ELEVEN_API_KEY || !ELEVEN_VOICE_ID) {
+    console.error(
+      '❌ ElevenLabs env missing: ELEVEN_API_KEY/ELEVENLABS_API_KEY or ELEVEN_VOICE_ID/ELEVENLABS_VOICE_ID'
+    );
+  } else {
+    console.log('🔑 ElevenLabs config OK. Model:', ELEVEN_MODEL_ID, 'Format:', ELEVEN_OUTPUT_FORMAT);
+  }
 }
 
 // ========= EXPRESS =========
@@ -163,6 +193,65 @@ async function postToWebhook(url, body) {
     console.log('📤 Webhook sent to:', url);
   } catch (err) {
     console.error('❌ Failed to send webhook:', err.message || err);
+  }
+}
+
+// שליחת אודיו (base64 g711_ulaw) לטוויליו
+function sendAudioToTwilio(streamSid, twilioWs, base64Audio) {
+  if (!streamSid) return;
+  if (!twilioWs || twilioWs.readyState !== WebSocket.OPEN) return;
+  if (!base64Audio) return;
+
+  const twilioMediaMsg = {
+    event: 'media',
+    streamSid,
+    media: {
+      payload: base64Audio,
+    },
+  };
+  twilioWs.send(JSON.stringify(twilioMediaMsg));
+}
+
+// קריאה ל-ElevenLabs כדי להמיר טקסט לאודיו בפורמט שמתאים לטוויליו
+async function ttsWithEleven(text) {
+  if (!text) return null;
+  if (!ELEVEN_API_KEY || !ELEVEN_VOICE_ID) {
+    console.error('❌ ELEVEN_API_KEY or ELEVEN_VOICE_ID missing - cannot call Eleven TTS');
+    return null;
+  }
+
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}?output_format=${encodeURIComponent(
+    ELEVEN_OUTPUT_FORMAT
+  )}&optimize_streaming_latency=${ELEVEN_OPTIMIZE_STREAMING}`;
+
+  console.log('🎧 Eleven TTS generating audio...');
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'xi-api-key': ELEVEN_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text,
+        model_id: ELEVEN_MODEL_ID,
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error('❌ Eleven TTS HTTP error:', res.status, errText);
+      return null;
+    }
+
+    const arrayBuffer = await res.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const base64Audio = buffer.toString('base64');
+    console.log('✅ Eleven TTS audio ready, bytes:', buffer.length);
+    return base64Audio;
+  } catch (err) {
+    console.error('❌ Eleven TTS fetch failed:', err.message || err);
+    return null;
   }
 }
 
@@ -224,7 +313,7 @@ function extractLeadFields(conversationLog) {
     }
   }
 
-  // מחפש שם (שמי ..., קוראים לי ...)
+  // מחפש שם (שמי ..., קוראים לי ... , אני ...)
   let contactName = '';
   for (let i = userTexts.length - 1; i >= 0 && !contactName; i--) {
     const txt = userTexts[i];
@@ -435,7 +524,7 @@ ${ENABLE_LEAD_CAPTURE ? `
         session: {
           instructions: finalSystemPrompt,
           voice: OPENAI_VOICE,
-          modalities: ['audio', 'text'],
+          modalities: ['audio', 'text'], // מקבלים גם טקסט וגם אודיו (אודיו נשתמש רק אם provider=openai)
 
           // חשוב: פורמט שתואם לטוויליו (מה שעבד לנו)
           input_audio_format: 'g711_ulaw',
@@ -583,8 +672,9 @@ ${CLOSING_SCRIPT}
         return;
       }
 
-      // אודיו מהבוט → טוויליו
+      // אודיו מהבוט → טוויליו (רק אם ספק ה-TTS הוא OpenAI)
       if (
+        TTS_PROVIDER === 'openai' &&
         msg.type === 'response.audio.delta' &&
         msg.delta &&
         streamSid &&
@@ -628,26 +718,42 @@ ${CLOSING_SCRIPT}
         }
       }
 
-      // טקסט תשובת הבוט – לוג
-      if (
-        (msg.type === 'response.output_text.done' ||
-          msg.type === 'response.output_text.delta') &&
-        msg.output &&
-        msg.output[0]?.content
-      ) {
-        const parts = msg.output[0].content;
-        const textParts = parts
-          .filter((p) => p.type === 'output_text' || p.type === 'text')
-          .map((p) => p.text || p.output_text)
-          .filter(Boolean);
+      // טקסט תשובת הבוט – מתוך response.completed (API החדש)
+      if (msg.type === 'response.completed' && msg.response && Array.isArray(msg.response.output)) {
+        const outputs = msg.response.output;
+        const textParts = [];
+
+        for (const out of outputs) {
+          if (out.type === 'output_text' && Array.isArray(out.content)) {
+            for (const c of out.content) {
+              if (
+                (c.type === 'output_text' || c.type === 'text') &&
+                (c.text || c.output_text)
+              ) {
+                textParts.push(c.text || c.output_text);
+              }
+            }
+          }
+        }
+
         if (textParts.length) {
           const botText = textParts.join(' ');
           console.log('🤖 Bot said:', botText);
           conversationLog.push({ from: 'bot', text: botText });
-        }
-      }
 
-      if (msg.type === 'response.completed') {
+          // במצב Eleven – אחרי שיש טקסט מלא, מייצרים אודיו דרך Eleven ושולחים לטוויליו
+          if (TTS_PROVIDER === 'eleven') {
+            ttsWithEleven(botText)
+              .then((base64Audio) => {
+                if (!base64Audio) return;
+                sendAudioToTwilio(streamSid, twilioWs, base64Audio);
+              })
+              .catch((err) => {
+                console.error('❌ Eleven TTS error:', err.message || err);
+              });
+          }
+        }
+
         console.log('✅ OpenAI response completed');
       }
 
