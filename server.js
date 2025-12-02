@@ -15,11 +15,15 @@ const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
 // ספק ה-TTS: openai (כמו היום) או eleven (ElevenLabs)
 const TTS_PROVIDER = (process.env.TTS_PROVIDER || 'openai').toLowerCase();
 
-// ElevenLabs TTS
-const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY || '';
-const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || '';
+// ElevenLabs TTS – תמיכה גם בשמות הישנים ELEVENLABS_*
+const ELEVEN_API_KEY =
+  process.env.ELEVEN_API_KEY || process.env.ELEVENLABS_API_KEY || '';
+const ELEVEN_VOICE_ID =
+  process.env.ELEVEN_VOICE_ID || process.env.ELEVENLABS_VOICE_ID || '';
 const ELEVEN_MODEL_ID =
-  process.env.ELEVEN_MODEL_ID || 'eleven_multilingual_v2';
+  process.env.ELEVEN_MODEL_ID || 'eleven_v3';
+const ELEVEN_OUTPUT_FORMAT =
+  process.env.ELEVEN_OUTPUT_FORMAT || 'ulaw_8000';
 const ELEVEN_OPTIMIZE_STREAMING =
   parseInt(process.env.ELEVEN_OPTIMIZE_STREAMING || '2', 10);
 
@@ -148,6 +152,11 @@ if (!OPENAI_API_KEY) {
   );
 }
 
+console.log('🎛 TTS_PROVIDER =', TTS_PROVIDER);
+if (TTS_PROVIDER === 'eleven') {
+  console.log('🎙 Eleven config -> model:', ELEVEN_MODEL_ID, 'voice:', ELEVEN_VOICE_ID, 'format:', ELEVEN_OUTPUT_FORMAT);
+}
+
 // ========= EXPRESS =========
 const app = express();
 app.get('/', (req, res) => {
@@ -201,9 +210,10 @@ async function ttsWithEleven(text) {
     return null;
   }
 
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}?output_format=ulaw_8000&optimize_streaming_latency=${ELEVEN_OPTIMIZE_STREAMING}`;
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}?output_format=${ELEVEN_OUTPUT_FORMAT}&optimize_streaming_latency=${ELEVEN_OPTIMIZE_STREAMING}`;
 
   try {
+    console.log('🎧 Calling Eleven TTS, text length:', text.length);
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -296,7 +306,7 @@ function extractLeadFields(conversationLog) {
     let m =
       txt.match(/שמי\s+([^\s,]+(?:\s+[^\s,]+)?)/) ||
       txt.match(/קוראים לי\s+([^\s,]+(?:\s+[^\s,]+)?)/) ||
-      txt.match(/אני\s+([^\ס,]+(?:\s+[^\s,]+)?)/);
+      txt.match(/אני\s+([^\s,]+(?:\s+[^\s,]+)?)/);
     if (m && m[1]) {
       contactName = m[1].trim();
     }
@@ -499,10 +509,10 @@ ${ENABLE_LEAD_CAPTURE ? `
         type: 'session.update',
         session: {
           instructions: finalSystemPrompt,
-          voice: OPENAI_VOICE,
+          voice: OPENAI_VOICE, // עדיין נותנים קול לאופן-איי, אבל נשתמש באודיו שלו רק אם TTS_PROVIDER=openai
           modalities: ['audio', 'text'],
 
-          // חשוב: פורמט שתואם לטוויליו (מה שעבד לנו)
+          // חשוב: פורמט שתואם לטוויליו
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
 
@@ -715,7 +725,10 @@ ${CLOSING_SCRIPT}
           if (TTS_PROVIDER === 'eleven' && msg.type === 'response.output_text.done') {
             ttsWithEleven(botText)
               .then((base64Audio) => {
-                if (!base64Audio) return;
+                if (!base64Audio) {
+                  console.error('⚠️ Eleven returned empty audio');
+                  return;
+                }
                 sendAudioToTwilio(streamSid, twilioWs, base64Audio);
               })
               .catch((err) => {
