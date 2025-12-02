@@ -47,21 +47,21 @@ const OPENAI_VOICE = process.env.OPENAI_VOICE || 'alloy';
 
 const TURN_THRESHOLD = parseFloat(
   process.env.MB_VAD_THRESHOLD ||
-    process.env.TURN_THRESHOLD ||
-    '0.5'
+  process.env.TURN_THRESHOLD ||
+  '0.5'
 );
 
 const TURN_SILENCE_MS = parseInt(
   process.env.MB_VAD_SILENCE_MS ||
-    process.env.TURN_SILENCE_MS ||
-    '600',
+  process.env.TURN_SILENCE_MS ||
+  '600',
   10
 );
 
 const TURN_PREFIX_MS = parseInt(
   process.env.MB_VAD_PREFIX_MS ||
-    process.env.TURN_PREFIX_MS ||
-    '300',
+  process.env.TURN_PREFIX_MS ||
+  '300',
   10
 );
 
@@ -93,7 +93,7 @@ const LEAD_WEBHOOK_URL =
   process.env.MAKE_WEBHOOK_URL ||
   '';
 
-// הגדרות "חוק ברזל" לניתוק (בפועל הניתוק האמיתי נעשה ע"י המתקשר; זה רק לעתיד אם נחבר ל-REST של Twilio)
+// הגדרות "חוק ברזל" לניתוק (לעתיד – כרגע לא קוראים ל-Twilio REST)
 const HANGUP_AFTER_GOODBYE =
   (process.env.MB_HANGUP_AFTER_GOODBYE || 'false')
     .toLowerCase() === 'true';
@@ -369,7 +369,8 @@ ${ENABLE_LEAD_CAPTURE ? `
 
       if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
         const openaiAudioMsg = {
-          type: 'input.audio_buffer.append', // לפי ה-API החדש
+          // 🔧 כאן היה הבאג – חייב להיות input_audio_buffer.append (עם קו תחתון)
+          type: 'input_audio_buffer.append',
           audio: payload,
         };
         openaiWs.send(JSON.stringify(openaiAudioMsg));
@@ -378,10 +379,6 @@ ${ENABLE_LEAD_CAPTURE ? `
 
     if (event === 'stop') {
       console.log('⏹️ Stream stopped');
-
-      // כאן בפועל טוויליו כבר סוגר את ה-Media Stream, כך שהודעת סגירה נוספת לא תישמע.
-      // הסקריפט הסוגר צריך להיאמר בתוך השיחה עצמה (דרך הפרומפט הכללי).
-      // עדיין נשתמש ב-CLOSING_SCRIPT כמלל שמסכם את הליד אם צריך במערכות חיצוניות.
 
       // אם יש Webhook ואיסוף לידים פעיל – נשלח אליו את לוג השיחה
       if (LEAD_WEBHOOK_URL && ENABLE_LEAD_CAPTURE) {
