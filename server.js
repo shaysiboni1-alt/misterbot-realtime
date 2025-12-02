@@ -1,5 +1,6 @@
 // server.js
-// MisterBot <-> Twilio <-> OpenAI Realtime bridge (קול Alloy בלבד, בלי Eleven כרגע)
+// MisterBot <-> Twilio <-> OpenAI Realtime bridge
+// תומך בשני מצבי TTS: Alloy (OpenAI) או ElevenLabs לפי TTS_PROVIDER
 
 const express = require('express');
 const http = require('http');
@@ -7,6 +8,16 @@ const WebSocket = require('ws');
 
 // ====== ENV ======
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// TTS provider: "openai" (Alloy) או "eleven"
+const TTS_PROVIDER = (process.env.TTS_PROVIDER || 'openai').toLowerCase();
+
+// ElevenLabs env
+const ELEVEN_API_KEY = process.env.ELEVENLABS_API_KEY || process.env.ELEVEN_API_KEY;
+const ELEVEN_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '';
+const ELEVEN_MODEL_ID = process.env.ELEVEN_MODEL_ID || 'eleven_v3';
+const ELEVEN_OUTPUT_FORMAT =
+  process.env.ELEVEN_OUTPUT_FORMAT || process.env.ELEVEN_OUTPUT_FORMAT || 'ulaw_8000';
 
 const BOT_NAME = process.env.MB_BOT_NAME || 'נטע';
 const BUSINESS_NAME =
@@ -82,6 +93,8 @@ if (!OPENAI_API_KEY) {
   console.error('❌ OPENAI_API_KEY is missing in env!');
 }
 
+console.log('🔊 TTS provider set to:', TTS_PROVIDER);
+
 // ====== Express + HTTP ======
 const app = express();
 app.get('/', (req, res) => {
@@ -89,7 +102,7 @@ app.get('/', (req, res) => {
 });
 const server = http.createServer(app);
 
-// ====== Helper: POST webhook (ללא ספריות חיצוניות) ======
+// ====== Helper: POST webhook ======
 async function postToWebhook(url, body) {
   if (!url) return;
   try {
@@ -104,7 +117,7 @@ async function postToWebhook(url, body) {
   }
 }
 
-// ====== Helper: שליחת אודיו לטוויליו ======
+// ====== Helper: Base64 → Twilio media ======
 function sendAudioToTwilio(streamSid, twilioWs, base64Audio) {
   if (!streamSid || !base64Audio) return;
   if (!twilioWs || twilioWs.readyState !== WebSocket.OPEN) return;
@@ -115,6 +128,47 @@ function sendAudioToTwilio(streamSid, twilioWs, base64Audio) {
     media: { payload: base64Audio },
   };
   twilioWs.send(JSON.stringify(msg));
+}
+
+// ====== ElevenLabs TTS (טקסט → אודיו ulaw_8000) ======
+async function ttsWithEleven(text) {
+  if (!ELEVEN_API_KEY || !ELEVEN_VOICE_ID) {
+    throw new Error('Missing ElevenLabs API key or voice id');
+  }
+
+  console.log('🎙️ ElevenLabs TTS text:', text);
+
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}/stream`;
+  const body = {
+    text,
+    model_id: ELEVEN_MODEL_ID,
+    output_format: ELEVEN_OUTPUT_FORMAT, // חשוב: ulaw_8000 לטוויליו
+    voice_settings: {
+      stability: 0.7,
+      similarity_boost: 0.8,
+      style: 0.2,
+      use_speaker_boost: true,
+    },
+  };
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'xi-api-key': ELEVEN_API_KEY,
+      'Content-Type': 'application/json',
+      Accept: 'audio/*',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => '');
+    throw new Error(`ElevenLabs error: ${resp.status} ${txt}`);
+  }
+
+  const arrayBuffer = await resp.arrayBuffer();
+  const base64 = Buffer.from(arrayBuffer).toString('base64');
+  return base64;
 }
 
 // זיהוי "פרידה"
@@ -170,7 +224,6 @@ wss.on('connection', (twilioWs) => {
 
     if (idleInterval) clearInterval(idleInterval);
 
-    // שולחים את הלוג ל-Webhook (אם יש)
     if (LEAD_WEBHOOK_URL) {
       const payload = {
         reason,
@@ -213,10 +266,10 @@ wss.on('connection', (twilioWs) => {
       const defaultPrompt = `
 אתם עוזר קולי בשם "${BOT_NAME}" עבור שירות "${BUSINESS_NAME}".
 
-שפות:
-- ברירת המחדל היא עברית.
-- אם הלקוח מדבר באנגלית או ברוסית, עברו לשפה שלו.
-- שפות זמינות: ${langsText}.
+שפה:
+- תמיד תענו בעברית ברורה עם ניקוד חלקי.
+- רק אם הלקוח מבקש במפורש לדבר באנגלית או ברוסית – תעברו לשפה שביקש.
+- אם הלקוח זורק מילים באנגלית אבל לא ביקש – תישארו בעברית.
 
 טון:
 - דיבור נעים, אנושי, בקול בטוח.
@@ -238,26 +291,32 @@ ${BUSINESS_PROMPT || '(אין כרגע מידע עסקי נוסף).'}
       const finalPrompt =
         (GENERAL_PROMPT && GENERAL_PROMPT.trim()) || defaultPrompt;
 
-      const sessionUpdate = {
-        type: 'session.update',
-        session: {
-          instructions: finalPrompt,
-          voice: 'alloy',
-          modalities: ['audio', 'text'],
-          input_audio_format: 'g711_ulaw',
-          output_audio_format: 'g711_ulaw',
-          input_audio_transcription: { model: 'whisper-1' },
-          turn_detection: {
-            type: 'server_vad',
-            threshold: TURN_THRESHOLD,
-            silence_duration_ms: TURN_SILENCE_MS,
-            prefix_padding_ms: TURN_PREFIX_MS,
-          },
+      // session.update בהתאם ל־TTS_PROVIDER
+      const session = {
+        instructions: finalPrompt,
+        modalities: TTS_PROVIDER === 'eleven' ? ['text'] : ['audio', 'text'],
+        input_audio_format: 'g711_ulaw',
+        input_audio_transcription: { model: 'whisper-1' },
+        turn_detection: {
+          type: 'server_vad',
+          threshold: TURN_THRESHOLD,
+          silence_duration_ms: TURN_SILENCE_MS,
+          prefix_padding_ms: TURN_PREFIX_MS,
         },
       };
 
+      if (TTS_PROVIDER === 'openai') {
+        session.voice = 'alloy';
+        session.output_audio_format = 'g711_ulaw';
+      }
+
+      const sessionUpdate = {
+        type: 'session.update',
+        session,
+      };
+
       openaiWs.send(JSON.stringify(sessionUpdate));
-      console.log('🧠 session.update sent');
+      console.log('🧠 session.update sent (TTS:', TTS_PROVIDER, ')');
 
       // ברכת פתיחה
       const greeting = {
@@ -347,7 +406,7 @@ ${BUSINESS_PROMPT || '(אין כרגע מידע עסקי נוסף).'}
       }, 1000);
     });
 
-    openaiWs.on('message', (raw) => {
+    openaiWs.on('message', async (raw) => {
       let msg;
       try {
         msg = JSON.parse(raw.toString());
@@ -356,16 +415,17 @@ ${BUSINESS_PROMPT || '(אין כרגע מידע עסקי נוסף).'}
         return;
       }
 
-      // לוג כללי כדי שנבין מה קורה
       console.log('🧾 OpenAI event:', msg.type);
 
-      // אודיו מהבוט → לטוויליו (Alloy)
-      if (
-        msg.type === 'response.audio.delta' &&
-        streamSid &&
-        twilioWs.readyState === WebSocket.OPEN
-      ) {
-        sendAudioToTwilio(streamSid, twilioWs, msg.delta);
+      // ====== MODE 1: TTS = OPENAI (Alloy Realtime) ======
+      if (TTS_PROVIDER === 'openai') {
+        if (
+          msg.type === 'response.audio.delta' &&
+          streamSid &&
+          twilioWs.readyState === WebSocket.OPEN
+        ) {
+          sendAudioToTwilio(streamSid, twilioWs, msg.delta);
+        }
       }
 
       // תמלול מהלקוח
@@ -391,7 +451,7 @@ ${BUSINESS_PROMPT || '(אין כרגע מידע עסקי נוסף).'}
         }
       }
 
-      // טקסט מהבוט (רק ללוג)
+      // טקסט מהבוט (משותף לשני המצבים)
       if (
         msg.type === 'response.output_text.delta' ||
         msg.type === 'response.output_text.done'
@@ -418,6 +478,16 @@ ${BUSINESS_PROMPT || '(אין כרגע מידע עסקי נוסף).'}
             const botText = textParts.join(' ');
             console.log('🤖 Bot said:', botText);
             conversationLog.push({ from: 'bot', text: botText });
+
+            // ====== MODE 2: TTS = ELEVEN (טקסט → אודיו בעצמנו) ======
+            if (TTS_PROVIDER === 'eleven' && streamSid && twilioWs.readyState === WebSocket.OPEN) {
+              try {
+                const base64Audio = await ttsWithEleven(botText);
+                sendAudioToTwilio(streamSid, twilioWs, base64Audio);
+              } catch (err) {
+                console.error('❌ ElevenLabs TTS failed, bot stays silent for this turn:', err.message || err);
+              }
+            }
           }
         }
       }
