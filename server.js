@@ -5,10 +5,8 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 
-// ===== משתני סביבה מ-Render =====
+// ====== ENV ======
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 
 if (!OPENAI_API_KEY) {
   console.error('❌ OPENAI_API_KEY is missing! Make sure it is set in Render env.');
@@ -21,8 +19,7 @@ app.get('/', (req, res) => {
 
 const server = http.createServer(app);
 
-// ===== WebSocket לטוויליו =====
-
+// ====== WebSocket לטוויליו ======
 const wss = new WebSocket.Server({ server, path: '/twilio-media-stream' });
 
 console.log('✅ MisterBot Realtime bridge starting up...');
@@ -52,40 +49,48 @@ wss.on('connection', (twilioWs) => {
       console.log('✅ OpenAI Realtime connected');
       openaiReady = true;
 
+      // הגדרת session: עברית, g711-ulaw, VAD בצד השרת
       const sessionUpdate = {
         type: 'session.update',
         session: {
           instructions: `
 אתם עוזר קולי בשם "נטע" עבור שירות האוטומציה לעסקים "MisterBot".
-דברו תמיד בעברית, בפנייה בלשון רבים (אתכם), בטון נעים, קצר וענייני.
-אפשר גם אנגלית ורוסית אם השיחה עוברת לשפה אחרת.
-ענו על שאלות כלליות על בוטים קוליים, קביעת תורים ומענה לעסקים,
-אבל אל תתנו לעולם מידע מפורט על חברות מתחרות.
+דברו תמיד בעברית, בלשון רבים (אתכם), בטון נעים, טבעי וקצר.
+אפשר גם לענות באנגלית או רוסית אם הלקוח מדבר בשפות הללו.
+ענו על כל שאלה כללית, אבל אל תתנו מידע מפורט על חברות או שירותים מתחרים בתחום של בוטים קוליים ואוטומציה לעסקים.
           `.trim(),
           voice: 'alloy',
           modalities: ['audio', 'text'],
-
-          // חשוב: g711_ulaw עם קו תחתון
-          input_audio_format: 'g711_ulaw',
-          output_audio_format: 'g711_ulaw',
-
+          input_audio_format: 'g711-ulaw',
+          output_audio_format: 'g711-ulaw',
           input_audio_transcription: {
             model: 'whisper-1',
           },
-
           turn_detection: {
             type: 'server_vad',
             threshold: 0.5,
             silence_duration_ms: 600,
             prefix_padding_ms: 300,
           },
-
           max_response_output_tokens: 'inf',
         },
       };
 
       openaiWs.send(JSON.stringify(sessionUpdate));
       console.log('🧠 OpenAI session.update sent');
+
+      // ברכת פתיחה אוטומטית – כדי לוודא שיש אודיו חוזר
+      const greeting = {
+        type: 'response.create',
+        response: {
+          instructions: `
+ברכי את הלקוח בעברית כ"נטע ממיסטר בוט".
+הציגי את עצמך בקצרה ושאלי איך אפשר לעזור, במשפט אחד קצר.
+          `.trim(),
+        },
+      };
+      openaiWs.send(JSON.stringify(greeting));
+      console.log('📢 Greeting response.create sent');
     });
 
     openaiWs.on('message', (data) => {
@@ -97,13 +102,10 @@ wss.on('connection', (twilioWs) => {
         return;
       }
 
-      console.log('🔁 OpenAI event:', msg.type);
+      // לוג בסיסי לדעת מה קורה
+      // console.log('🧠 OpenAI event:', msg.type);
 
-      if (msg.type === 'error' || msg.type === 'response.error') {
-        console.error('❌ OpenAI error event:', JSON.stringify(msg, null, 2));
-      }
-
-      // אודיו מהבוט לטוויליו
+      // אודיו מהבוט ← אל טוויליו
       if (
         msg.type === 'response.audio.delta' &&
         msg.delta &&
@@ -114,15 +116,12 @@ wss.on('connection', (twilioWs) => {
           event: 'media',
           streamSid,
           media: {
-            // base64 של g711_ulaw – בדיוק מה שטוויליו מצפה לו
-            payload: msg.delta,
+            payload: msg.delta, // base64 g711-ulaw
           },
         };
+        // לוג לצורך דיבוג
+        // console.log('🎧 Sending audio chunk to Twilio, size:', msg.delta.length);
         twilioWs.send(JSON.stringify(twilioMediaMsg));
-      }
-
-      if (msg.type === 'response.completed') {
-        console.log('✅ OpenAI response completed');
       }
 
       if (msg.type === 'conversation.item.input_audio_transcription.completed') {
@@ -130,6 +129,14 @@ wss.on('connection', (twilioWs) => {
         if (transcript) {
           console.log('👂 User said:', transcript);
         }
+      }
+
+      if (msg.type === 'response.completed') {
+        console.log('✅ OpenAI response completed');
+      }
+
+      if (msg.type === 'error') {
+        console.error('❌ OpenAI error event:', msg);
       }
     });
 
@@ -144,7 +151,7 @@ wss.on('connection', (twilioWs) => {
     });
   }
 
-  // מחברים ל-OpenAI ברגע שטוויליו נכנס
+  // מחברים לאופן-איי כשחיבור טוויליו נפתח
   connectToOpenAI();
 
   // ---------- הודעות מטוויליו ----------
@@ -165,26 +172,21 @@ wss.on('connection', (twilioWs) => {
     }
 
     if (event === 'media') {
-      // אודיו מהלקוח (base64 של G711 μ-law)
-      const payload = data.media.payload;
+      // אודיו מהלקוח (base64 g711-ulaw)
+      const payload = data.media && data.media.payload;
+      if (!payload) return;
 
       if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
         const openaiAudioMsg = {
-          // *** זה התיקון הקריטי: קו תחתון, לא נקודה ***
-          type: 'input_audio_buffer.append',
+          type: 'input_audio_buffer.append', // שים לב: עם _
           audio: payload,
         };
         openaiWs.send(JSON.stringify(openaiAudioMsg));
       }
     }
 
-    if (event === 'mark') {
-      console.log('📍 Twilio mark:', data.mark.name);
-    }
-
     if (event === 'stop') {
       console.log('⏹️ Stream stopped');
-
       if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
         openaiWs.close();
       }
@@ -207,7 +209,7 @@ wss.on('connection', (twilioWs) => {
   });
 });
 
-// ===== הרצת השרת =====
+// ====== RUN SERVER ======
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
   console.log(`🚀 MisterBot Realtime server listening on port ${PORT}`);
