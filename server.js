@@ -52,31 +52,34 @@ wss.on('connection', (twilioWs) => {
       console.log('✅ OpenAI Realtime connected');
       openaiReady = true;
 
-      // שים לב: g711_ulaw עם קו תחתון, זה חשוב מאוד!
       const sessionUpdate = {
         type: 'session.update',
         session: {
           instructions: `
 אתם עוזר קולי בשם "נטע" עבור שירות האוטומציה לעסקים "MisterBot".
 דברו תמיד בעברית, בפנייה בלשון רבים (אתכם), בטון נעים, קצר וענייני.
-אפשר גם אנגלית ורוסית אם השיחה זזה לשפה אחרת.
+אפשר גם אנגלית ורוסית אם השיחה עוברת לשפה אחרת.
 ענו על שאלות כלליות על בוטים קוליים, קביעת תורים ומענה לעסקים,
 אבל אל תתנו לעולם מידע מפורט על חברות מתחרות.
           `.trim(),
           voice: 'alloy',
           modalities: ['audio', 'text'],
-          // *** זה התיקון הקריטי ***
+
+          // חשוב: g711_ulaw עם קו תחתון
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
+
           input_audio_transcription: {
             model: 'whisper-1',
           },
+
           turn_detection: {
             type: 'server_vad',
             threshold: 0.5,
             silence_duration_ms: 600,
             prefix_padding_ms: 300,
           },
+
           max_response_output_tokens: 'inf',
         },
       };
@@ -94,7 +97,6 @@ wss.on('connection', (twilioWs) => {
         return;
       }
 
-      // לוג כללי לכל האירועים – לעכשיו לדיבוג
       console.log('🔁 OpenAI event:', msg.type);
 
       if (msg.type === 'error' || msg.type === 'response.error') {
@@ -112,7 +114,7 @@ wss.on('connection', (twilioWs) => {
           event: 'media',
           streamSid,
           media: {
-            // OpenAI מחזיר base64 של g711_ulaw – בדיוק מה שטוויליו מצפה לו
+            // base64 של g711_ulaw – בדיוק מה שטוויליו מצפה לו
             payload: msg.delta,
           },
         };
@@ -168,7 +170,8 @@ wss.on('connection', (twilioWs) => {
 
       if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
         const openaiAudioMsg = {
-          type: 'input.audio_buffer.append',
+          // *** זה התיקון הקריטי: קו תחתון, לא נקודה ***
+          type: 'input_audio_buffer.append',
           audio: payload,
         };
         openaiWs.send(JSON.stringify(openaiAudioMsg));
