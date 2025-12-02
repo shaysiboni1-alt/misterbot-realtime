@@ -8,44 +8,100 @@ const WebSocket = require('ws');
 // ========= ENV =========
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// שם הבוט / העסק / טקסט פתיח וסגירה
-const BOT_NAME = process.env.BOT_NAME || 'נטע';
-const BUSINESS_NAME = process.env.BUSINESS_NAME || 'MisterBot';
-const OPENING_SUFFIX =
-  process.env.OPENING_SUFFIX ||
-  'שירות האוטומציה לעסקים. אני כאן כדי לעזור לכם בכל שאלה על בוטים קוליים ומערכת מיסטר בוט.';
-const ENDING_MESSAGE =
+// --- שמות הבוט / העסק (עם תאימות לשמות ישנים) ---
+const BOT_NAME =
+  process.env.MB_BOT_NAME ||
+  process.env.BOT_NAME ||
+  'נטע';
+
+const BUSINESS_NAME =
+  process.env.MB_BUSINESS_NAME ||
+  process.env.BUSINESS_NAME ||
+  'MisterBot';
+
+// פתיח / סגיר – אם יש סקריפטים מלאים נשתמש בהם, אחרת נוסחה גנרית
+const OPENING_SCRIPT =
+  process.env.MB_OPENING_SCRIPT || process.env.OPENING_SCRIPT || '';
+
+const CLOSING_SCRIPT =
+  process.env.MB_CLOSING_SCRIPT ||
   process.env.ENDING_MESSAGE ||
   'תודה שפניתם למיסטר בוט, שיהיה לכם המשך יום נעים. להתראות.';
 
-// פרומפט כללי (טון, שפות, איסור על מתחרים וכו׳)
-const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT;
+// פרומפטים כלליים / עסקיים
+const GENERAL_PROMPT = process.env.MB_GENERAL_PROMPT || process.env.SYSTEM_PROMPT || '';
+const BUSINESS_PROMPT = process.env.MB_BUSINESS_PROMPT || process.env.BUSINESS_KB || '';
 
-// פרומפט ידע עסקי – מידע על העסק הספציפי
-const BUSINESS_KB = process.env.BUSINESS_KB || '';
+// שפות (ברירת מחדל: עברית, אנגלית, רוסית)
+const LANGUAGES =
+  (process.env.MB_LANGUAGES || 'he,en,ru')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+// מהירות "לוגית" (נשתמש בהוראה בפרומפט, לא פרמטר טכני במודל)
+const SPEECH_SPEED = parseFloat(process.env.MB_SPEECH_SPEED || '1.15'); // 1.0 = רגיל
 
 // שליטה ב-Voice וב-VAD (מהירות תגובה/רגישות)
 const OPENAI_VOICE = process.env.OPENAI_VOICE || 'alloy';
-const TURN_THRESHOLD = parseFloat(process.env.TURN_THRESHOLD || '0.5');
-const TURN_SILENCE_MS = parseInt(process.env.TURN_SILENCE_MS || '600', 10);
-const TURN_PREFIX_MS = parseInt(process.env.TURN_PREFIX_MS || '300', 10);
-const MAX_OUTPUT_TOKENS = process.env.MAX_OUTPUT_TOKENS || 'inf';
+
+const TURN_THRESHOLD = parseFloat(
+  process.env.MB_VAD_THRESHOLD ||
+    process.env.TURN_THRESHOLD ||
+    '0.5'
+);
+
+const TURN_SILENCE_MS = parseInt(
+  process.env.MB_VAD_SILENCE_MS ||
+    process.env.TURN_SILENCE_MS ||
+    '600',
+  10
+);
+
+const TURN_PREFIX_MS = parseInt(
+  process.env.MB_VAD_PREFIX_MS ||
+    process.env.TURN_PREFIX_MS ||
+    '300',
+  10
+);
+
+const MAX_OUTPUT_TOKENS =
+  process.env.MAX_OUTPUT_TOKENS || 'inf';
 
 // איסוף פרטים / לידים
 const ENABLE_LEAD_CAPTURE =
-  (process.env.ENABLE_LEAD_CAPTURE || 'false').toLowerCase() === 'true';
+  (process.env.MB_ENABLE_LEAD_CAPTURE ||
+    process.env.ENABLE_LEAD_CAPTURE ||
+    'true')
+    .toLowerCase() === 'true';
 
-// שדות לליד מלקוח חדש / לקוח קיים – טקסט חופשי שאתה מגדיר
+// שאלות ללקוח חדש / קיים – טקסט חופשי שאתה מגדיר ב-ENV
 const NEW_LEAD_PROMPT =
+  process.env.MB_NEW_LEAD_QUESTIONS ||
   process.env.NEW_LEAD_PROMPT ||
-  'אם מדובר בלקוח חדש, בקשי שם מלא, מספר טלפון וסיבת הפנייה בצורה נינוחה וקצרה.';
-const EXISTING_LEAD_PROMPT =
-  process.env.EXISTING_LEAD_PROMPT ||
-  'אם מדובר בלקוח קיים, בקשי שם מלא, מספר טלפון, ואם יש – מספר לקוח או מזהה, וסיבת הפנייה.';
+  'אם מדובר בלקוח חדש, בקשי שם מלא, שם העסק, תחום הפעילות, מספר טלפון וסיבת הפנייה בצורה קצרה ונינוחה.';
 
-// לאן נשלח את הנתונים בסיום השיחה
+const EXISTING_LEAD_PROMPT =
+  process.env.MB_EXISTING_CLIENT_QUESTIONS ||
+  process.env.EXISTING_LEAD_PROMPT ||
+  'אם מדובר בלקוח קיים, בקשי שם מלא או שם עסק, מספר טלפון, וסוג הפנייה (תמיכה, חיוב, שינוי הגדרות, שאלה כללית).';
+
+// אל איזה Webhook שולחים את הלוג (למשל Make)
 const LEAD_WEBHOOK_URL =
-  process.env.LEAD_WEBHOOK_URL || process.env.MAKE_WEBHOOK_URL || '';
+  process.env.MB_WEBHOOK_URL ||
+  process.env.LEAD_WEBHOOK_URL ||
+  process.env.MAKE_WEBHOOK_URL ||
+  '';
+
+// הגדרות "חוק ברזל" לניתוק (בפועל הניתוק האמיתי נעשה ע"י המתקשר; זה רק לעתיד אם נחבר ל-REST של Twilio)
+const HANGUP_AFTER_GOODBYE =
+  (process.env.MB_HANGUP_AFTER_GOODBYE || 'false')
+    .toLowerCase() === 'true';
+
+const HANGUP_GRACE_MS = parseInt(
+  process.env.MB_HANGUP_GRACE_MS || '2000',
+  10
+);
 
 // =============== בדיקת מפתח ===============
 if (!OPENAI_API_KEY) {
@@ -112,34 +168,60 @@ wss.on('connection', (twilioWs) => {
       console.log('✅ OpenAI Realtime connected');
       openaiReady = true;
 
-      // פרומפט ברירת מחדל אם לא הוגדר SYSTEM_PROMPT ב-ENV
+      // שפות לקריאה בפרומפט
+      const langsText = LANGUAGES.join(', ');
+
+      // פרומפט ברירת מחדל אם לא הוגדר MB_GENERAL_PROMPT ב-ENV
       const defaultSystemPrompt = `
 אתם עוזר קולי בשם "${BOT_NAME}" עבור שירות "${BUSINESS_NAME}".
-דברו תמיד בעברית כברירת מחדל, בלשון רבים (אתכם), בטון נעים, טבעי, חמים וקצר.
-אם הלקוח מדבר באנגלית או ברוסית, אפשר לעבור לשפה שלו, אבל אל תעברו שפה בלי סיבה.
-ענו במהירות, במשפטים קצרים יחסית, בלי נאומים ארוכים.
-מותר לענות על כל שאלה כללית, אבל:
-- אל תמליצו על חברות או שירותים מתחרים למיסטר בוט.
-- אם שואלים במפורש על מתחרים, תגידו בעדינות שאתם לא נותנים מידע שיווקי על מתחרים.
-שלבו בשיחה את הידע העסקי הבא (אם רלוונטי): 
-${BUSINESS_KB || '(אין כרגע מידע עסקי נוסף)'}
+
+שפות:
+- ברירת המחדל היא עברית.
+- אם הלקוח מדבר באנגלית או ברוסית, עברו לשפה שלו באופן טבעי.
+- שפות זמינות: ${langsText}.
+
+טון ודיבור:
+- דיברו בטון חם, נעים, מקצועי ולא רובוטי.
+- דברו בפנייה בלשון רבים ("אתכם").
+- משפטים קצרים וברורים, בלי נאומים ארוכים.
+- קצב הדיבור מעט מהיר מהרגיל (בערך פי ${SPEECH_SPEED} מקצב סטנדרטי), אבל עדיין ברור ונעים.
+- אל תפסיקו באמצע תשובה גם אם הלקוח מדבר עליכם; סיימו משפט אחד ואז הגיבו.
+
+טלפונים:
+- כשמבקשים מספר טלפון, בקשו מהלקוח להגיד את המספר ספרה-ספרה.
+- התייחסו למספר כאל רצף ספרות בלבד (ללא מילים).
+- לעולם אל תוסיפו קידומת בינלאומית +972. השאירו את האפס בתחילת המספר (למשל 054...).
+- חזרו על המספר ללקוח לווידוא.
+
+מתחרים:
+- מותר להסביר באופן כללי על עולם הבוטים הקוליים והאוטומציה לעסקים.
+- אסור לתת מידע מפורט או להמליץ על חברות / שירותים מתחרים ספציפיים.
+- אם שואלים על חברה מתחרה, אמרו בעדינות שאתם לא נותנים מידע שיווקי על ספקים אחרים ותמקדו את השיחה במה שמיסטר בוט מציעה.
+
+ידע עסקי:
+${BUSINESS_PROMPT || '(אין כרגע מידע עסקי נוסף)'}
 
 ${ENABLE_LEAD_CAPTURE ? `
-במהלך השיחה נסו להבין האם מדובר בלקוח חדש או לקוח קיים.
+איסוף פרטי פנייה:
+- במהלך השיחה נסו להבין אם מדובר בלקוח חדש או בלקוח קיים.
 - אם זה לקוח חדש: ${NEW_LEAD_PROMPT}
 - אם זה לקוח קיים: ${EXISTING_LEAD_PROMPT}
-בסיום השיחה, אם נאספו פרטים, תסכמו אותם במשפט קצר וברור (שם, טלפון, סיבת פנייה).
+- בסיום שיחה שבה נאספו פרטים, סיימו במשפט קצר שמסכם את הפרטים (שם, טלפון, סוג הפנייה).
 ` : ''}
 `.trim();
+
+      const finalSystemPrompt =
+        (GENERAL_PROMPT && GENERAL_PROMPT.trim()) ||
+        defaultSystemPrompt;
 
       const sessionUpdate = {
         type: 'session.update',
         session: {
-          instructions: (SYSTEM_PROMPT || defaultSystemPrompt).trim(),
+          instructions: finalSystemPrompt,
           voice: OPENAI_VOICE,
           modalities: ['audio', 'text'],
 
-          // חשוב: הפורמט שתואם לטוויליו
+          // חשוב: פורמט שתואם לטוויליו (מה שעבד לנו)
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
 
@@ -159,18 +241,29 @@ ${ENABLE_LEAD_CAPTURE ? `
       openaiWs.send(JSON.stringify(sessionUpdate));
       console.log('🧠 OpenAI session.update sent');
 
-      // ברכת פתיחה – ניתנת לשליטה דרך ENV (שם + OPENING_SUFFIX)
+      // ברכת פתיחה – אם יש סקריפט פתיחה ב-ENV, נשתמש בו כמו שהוא
+      let greetingInstructions;
+      if (OPENING_SCRIPT) {
+        greetingInstructions = `
+אמרי את משפט הפתיחה הבא כמעט מילה במילה, בטון טבעי ונעים:
+"${OPENING_SCRIPT}"
+        `.trim();
+      } else {
+        greetingInstructions = `
+פתחי את השיחה בעברית, במשפט אחד קצר:
+ברכי את הלקוח, הציגי את עצמך כ"${BOT_NAME}" מ"${BUSINESS_NAME}",
+הסבירי בקצרה שמדובר בשירות בוטים קוליים ואוטומציה לעסקים,
+ושאלי איך אפשר לעזור.
+        `.trim();
+      }
+
       const greeting = {
         type: 'response.create',
         response: {
-          instructions: `
-את ${BOT_NAME} מ"${BUSINESS_NAME}".
-פתחי את השיחה בעברית, במשפט אחד קצר:
-היי או שלום, הציגי את עצמך כ"${BOT_NAME}" ממיסטר בוט, הוסיפי בקצרה: "${OPENING_SUFFIX}",
-ושאלי בנימוס איך אפשר לעזור. 
-          `.trim(),
+          instructions: greetingInstructions,
         },
       };
+
       openaiWs.send(JSON.stringify(greeting));
       console.log('📢 Greeting response.create sent');
     });
@@ -210,8 +303,13 @@ ${ENABLE_LEAD_CAPTURE ? `
         }
       }
 
-      // טקסט של תשובת הבוט – אם תרצה לוג טקסטואלי
-      if (msg.type === 'response.output_text.done' && msg.output && msg.output[0]?.content) {
+      // טקסט תשובת הבוט – לוג
+      if (
+        (msg.type === 'response.output_text.done' ||
+          msg.type === 'response.output_text.delta') &&
+        msg.output &&
+        msg.output[0]?.content
+      ) {
         const parts = msg.output[0].content;
         const textParts = parts
           .filter((p) => p.type === 'output_text' || p.type === 'text')
@@ -271,7 +369,7 @@ ${ENABLE_LEAD_CAPTURE ? `
 
       if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
         const openaiAudioMsg = {
-          type: 'input_audio_buffer.append',
+          type: 'input.audio_buffer.append', // לפי ה-API החדש
           audio: payload,
         };
         openaiWs.send(JSON.stringify(openaiAudioMsg));
@@ -281,27 +379,18 @@ ${ENABLE_LEAD_CAPTURE ? `
     if (event === 'stop') {
       console.log('⏹️ Stream stopped');
 
-      // שליחת הודעת סגירה (ברמת הטון – הבוט כבר יודע מה להגיד מהפרומפט)
-      if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
-        const closing = {
-          type: 'response.create',
-          response: {
-            instructions: `
-סיימי את השיחה במשפט סיום נעים וקצר בעברית, בסגנון:
-"${ENDING_MESSAGE}"
-            `.trim(),
-          },
-        };
-        openaiWs.send(JSON.stringify(closing));
-      }
+      // כאן בפועל טוויליו כבר סוגר את ה-Media Stream, כך שהודעת סגירה נוספת לא תישמע.
+      // הסקריפט הסוגר צריך להיאמר בתוך השיחה עצמה (דרך הפרומפט הכללי).
+      // עדיין נשתמש ב-CLOSING_SCRIPT כמלל שמסכם את הליד אם צריך במערכות חיצוניות.
 
-      // אם מוגדר webhook – נשלח אליו את לוג השיחה
+      // אם יש Webhook ואיסוף לידים פעיל – נשלח אליו את לוג השיחה
       if (LEAD_WEBHOOK_URL && ENABLE_LEAD_CAPTURE) {
         const payload = {
           streamSid,
           businessName: BUSINESS_NAME,
           botName: BOT_NAME,
           timestamp: new Date().toISOString(),
+          closingMessage: CLOSING_SCRIPT,
           conversationLog,
         };
         postToWebhook(LEAD_WEBHOOK_URL, payload);
