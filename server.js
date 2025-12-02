@@ -8,6 +8,10 @@ const WebSocket = require('ws');
 // ========= ENV =========
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
+// Twilio (אופציונלי, לצורך ניתוק יזום של השיחה מהשרת)
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || '';
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
+
 // --- שמות הבוט / העסק (עם תאימות לשמות ישנים) ---
 const BOT_NAME =
   process.env.MB_BOT_NAME ||
@@ -46,16 +50,17 @@ const SPEECH_SPEED = parseFloat(process.env.MB_SPEECH_SPEED || '1.15'); // 1.0 =
 // שליטה ב-Voice וב-VAD (מהירות תגובה/רגישות)
 const OPENAI_VOICE = process.env.OPENAI_VOICE || 'alloy';
 
+// ברירת מחדל עדינה יותר לרעש רקע: threshold 0.4, silence 800ms
 const TURN_THRESHOLD = parseFloat(
   process.env.MB_VAD_THRESHOLD ||
     process.env.TURN_THRESHOLD ||
-    '0.5'
+    '0.4'
 );
 
 const TURN_SILENCE_MS = parseInt(
   process.env.MB_VAD_SILENCE_MS ||
     process.env.TURN_SILENCE_MS ||
-    '600',
+    '800',
   10
 );
 
@@ -174,8 +179,12 @@ function isGoodbye(text) {
     /אין לי.*שאלות/,
     /סיימנו/,
     /מספיק לעכשיו/,
+    /יאללה תודה/,
+    /טוב תודה/,
+    /סבבה תודה/,
     /להתראות/,
     /ביי/,
+    /יאללה ביי/,
     /יום טוב/,
     /ערב טוב/,
     /לילה טוב/,
@@ -184,9 +193,104 @@ function isGoodbye(text) {
     /i'm done/,
     /no more questions/,
     /thank you,? that's all/,
-    /ok thanks/,
+    /ok thanks/
   ];
   return patterns.some((re) => re.test(t));
+}
+
+// חילוץ שדות ליד בסיסיים מתוך לוג השיחה (הערכה חכמה, לא מושלם)
+function extractLeadFields(conversationLog) {
+  const userTexts = conversationLog
+    .filter((m) => m.from === 'user' && typeof m.text === 'string')
+    .map((m) => m.text.trim())
+    .filter(Boolean);
+
+  if (!userTexts.length) {
+    return {
+      contactName: '',
+      businessName: '',
+      phone: '',
+      leadType: '',
+      notes: ''
+    };
+  }
+
+  // מחפש טלפון (רצף ספרות אחרון באחד המשפטים האחרונים)
+  let phone = '';
+  for (let i = userTexts.length - 1; i >= 0 && !phone; i--) {
+    const digits = userTexts[i].replace(/[^\d]/g, '');
+    if (digits.length >= 7 && digits.length <= 15) {
+      phone = digits;
+    }
+  }
+
+  // מחפש שם (שמי ..., קוראים לי ...)
+  let contactName = '';
+  for (let i = userTexts.length - 1; i >= 0 && !contactName; i--) {
+    const txt = userTexts[i];
+    let m =
+      txt.match(/שמי\s+([^\s,]+(?:\s+[^\s,]+)?)/) ||
+      txt.match(/קוראים לי\s+([^\s,]+(?:\s+[^\s,]+)?)/) ||
+      txt.match(/אני\s+([^\s,]+(?:\s+[^\s,]+)?)/);
+    if (m && m[1]) {
+      contactName = m[1].trim();
+    }
+  }
+
+  // מחפש שם עסק (שם העסק..., העסק שלי...)
+  let businessName = '';
+  for (let i = userTexts.length - 1; i >= 0 && !businessName; i--) {
+    const txt = userTexts[i];
+    let m =
+      txt.match(/שם העסק[:\-]?\s*(.+)$/) ||
+      txt.match(/העסק שלי\s+(.+)$/);
+    if (m && m[1]) {
+      businessName = m[1].trim();
+    }
+  }
+
+  // הערכת סוג ליד (חדש / קיים) על בסיס מילים אופייניות
+  const joined = userTexts.join(' ').toLowerCase();
+  let leadType = '';
+  if (/לקוח קיים|כבר עובד/.test(joined)) {
+    leadType = 'existing';
+  } else if (/לקוח חדש|מתעניין חדש|רוצה להצטרף/.test(joined)) {
+    leadType = 'new';
+  }
+
+  // הערות – לוקח את 1–2 המשפטים האחרונים של הלקוח
+  const lastTwo = userTexts.slice(-2).join(' | ');
+
+  return {
+    contactName,
+    businessName,
+    phone,
+    leadType,
+    notes: lastTwo
+  };
+}
+
+// ניתוק יזום של שיחה בטוויליו דרך REST (אופציונלי)
+async function hangupTwilioCall(callSid) {
+  if (!callSid || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) return;
+  const auth = Buffer.from(
+    `${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`
+  ).toString('base64');
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}.json`;
+
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${auth}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: 'Status=completed'
+    });
+    console.log('☎️ Requested Twilio hangup for callSid:', callSid);
+  } catch (err) {
+    console.error('❌ Failed to hang up Twilio call via REST:', err.message || err);
+  }
 }
 
 // ========= חיבורי WS =========
@@ -194,6 +298,7 @@ wss.on('connection', (twilioWs) => {
   console.log('📞 Twilio media stream connected');
 
   let streamSid = null;
+  let callSid = null;
   let openaiWs = null;
   let openaiReady = false;
 
@@ -223,21 +328,31 @@ wss.on('connection', (twilioWs) => {
       idleInterval = null;
     }
 
+    // חילוץ שדות ליד מהשיחה
+    const lead = extractLeadFields(conversationLog);
+
     // שליחת לוג / ליד ל-Webhook אם רלוונטי
     if (LEAD_WEBHOOK_URL && ENABLE_LEAD_CAPTURE) {
       const payload = {
         reason,
         streamSid,
+        callSid,
         businessName: BUSINESS_NAME,
         botName: BOT_NAME,
         timestamp: new Date().toISOString(),
         closingMessage: CLOSING_SCRIPT,
-        conversationLog,
+        lead,
+        conversationLog
       };
       postToWebhook(LEAD_WEBHOOK_URL, payload);
     }
 
-    // סגירת החיבורים – Twilio יסיים את השיחה ברגע שה-Stream נסגר
+    // ניתוק יזום של השיחה בטוויליו (אם יש אישורים מתאימים)
+    if (callSid) {
+      hangupTwilioCall(callSid);
+    }
+
+    // סגירת החיבורים – Twilio יסיים את השיחה ברגע שה-Stream נסגר (ובנוסף REST למעלה)
     if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
       openaiWs.close();
     }
@@ -569,7 +684,8 @@ ${CLOSING_SCRIPT}
 
     if (event === 'start') {
       streamSid = data.start.streamSid;
-      console.log('▶️ Stream started, streamSid:', streamSid);
+      callSid = data.start.callSid || null;
+      console.log('▶️ Stream started, streamSid:', streamSid, 'callSid:', callSid || 'N/A');
       lastMediaTs = Date.now();
     }
 
