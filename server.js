@@ -35,11 +35,10 @@ const BUSINESS_PROMPT =
   process.env.MB_BUSINESS_PROMPT || process.env.BUSINESS_KB || '';
 
 // שפות (ברירת מחדל: עברית, אנגלית, רוסית)
-const LANGUAGES =
-  (process.env.MB_LANGUAGES || 'he,en,ru')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+const LANGUAGES = (process.env.MB_LANGUAGES || 'he,en,ru')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 // מהירות "לוגית" (נשתמש בהוראה בפרומפט, לא פרמטר טכני במודל)
 const SPEECH_SPEED = parseFloat(process.env.MB_SPEECH_SPEED || '1.15'); // 1.0 = רגיל
@@ -95,9 +94,9 @@ const LEAD_WEBHOOK_URL =
   process.env.MAKE_WEBHOOK_URL ||
   '';
 
-// הגדרות "חוק ברזל" לניתוק (לעתיד – כרגע לא קוראים ל-Twilio REST)
+// ניתוק אחרי פרידה (משמש יחד עם טיימאאוט קצר)
 const HANGUP_AFTER_GOODBYE =
-  (process.env.MB_HANGUP_AFTER_GOODBYE || 'false')
+  (process.env.MB_HANGUP_AFTER_GOODBYE || 'true')
     .toLowerCase() === 'true';
 
 const HANGUP_GRACE_MS = parseInt(
@@ -105,15 +104,26 @@ const HANGUP_GRACE_MS = parseInt(
   10
 );
 
-// זמנים לשקט לפני אזהרה / ניתוק אוטומטי
+// טיימרים לשקט
 const IDLE_WARNING_MS = parseInt(
-  process.env.MB_IDLE_WARNING_MS || '20000',
+  process.env.MB_IDLE_WARNING_MS || '20000', // אחרי 20 שניות שקט – "אתם עדיין שם?"
   10
-); // אחרי 20 שניות שקט – "אתם עדיין על הקו?"
+);
 const IDLE_HANGUP_MS = parseInt(
-  process.env.MB_IDLE_HANGUP_MS || '35000',
+  process.env.MB_IDLE_HANGUP_MS || '35000', // אחרי 35 שניות שקט – פרידה וניתוק
   10
-); // אחרי 35 שניות שקט – סיום שיחה וניתוק
+);
+
+// מגבלת שיחה (ברירת מחדל: 5 דקות = 300000ms)
+const MAX_CALL_MS = parseInt(
+  process.env.MB_MAX_CALL_MS || '300000',
+  10
+);
+// כמה לפני הסוף להזהיר (ברירת מחדל: 45 שניות לפני 5 דקות)
+const MAX_WARN_BEFORE_MS = parseInt(
+  process.env.MB_MAX_WARN_BEFORE_MS || '45000',
+  10
+);
 
 // =============== בדיקת מפתח ===============
 if (!OPENAI_API_KEY) {
@@ -151,6 +161,34 @@ async function postToWebhook(url, body) {
   }
 }
 
+// זיהוי "פרידה" מהלקוח לפי הטקסט
+function isGoodbye(text) {
+  if (!text) return false;
+  const t = text.toLowerCase().trim();
+  const patterns = [
+    /תודה רבה/,
+    /תודה,? זהו/,
+    /זהו,? תודה/,
+    /זה הכל/,
+    /זהו הכל/,
+    /אין לי.*שאלות/,
+    /סיימנו/,
+    /מספיק לעכשיו/,
+    /להתראות/,
+    /ביי/,
+    /יום טוב/,
+    /ערב טוב/,
+    /לילה טוב/,
+    /that's all/,
+    /that is all/,
+    /i'm done/,
+    /no more questions/,
+    /thank you,? that's all/,
+    /ok thanks/,
+  ];
+  return patterns.some((re) => re.test(t));
+}
+
 // ========= חיבורי WS =========
 wss.on('connection', (twilioWs) => {
   console.log('📞 Twilio media stream connected');
@@ -159,46 +197,51 @@ wss.on('connection', (twilioWs) => {
   let openaiWs = null;
   let openaiReady = false;
 
-  // לוג טקסטואלי של השיחה
+  // ניהול זמן שיחה / שקט
+  const callStartTs = Date.now();
+  let lastMediaTs = Date.now();
+  let idleWarningSent = false;
+  let maxTimeWarningSent = false;
+  let idleInterval = null;
+
+  // דגלים כדי לא לסיים שיחה פעמיים
+  let callEnded = false;
+  let closingStarted = false;
+  let goodbyeHandled = false;
+
+  // נשמור לוג טקסטואלי של השיחה
   const conversationLog = [];
 
-  // ניטור שקט
-  let lastUserMediaTs = Date.now();
-  let idleWarningSent = false;
-  let idleInterval = null;
-  let callEnded = false;
-
-  // פונקציה מרכזית לסיום שיחה (גם ל-stop וגם לניתוק אוטומטי)
-  function endCall(reason = 'unknown') {
+  // פונקציה מרכזית לסיום שיחה (גם stop, גם ניתוקים אוטומטיים)
+  function endCall(reason) {
     if (callEnded) return;
     callEnded = true;
+    console.log('🔚 Ending call, reason:', reason);
 
-    console.log(`⏹️ Ending call, reason: ${reason}`);
-
-    // לעצור בדיקות שקט
     if (idleInterval) {
       clearInterval(idleInterval);
       idleInterval = null;
     }
 
-    // אם יש Webhook ואיסוף לידים פעיל – נשלח אליו את לוג השיחה
+    // שליחת לוג / ליד ל-Webhook אם רלוונטי
     if (LEAD_WEBHOOK_URL && ENABLE_LEAD_CAPTURE) {
       const payload = {
+        reason,
         streamSid,
         businessName: BUSINESS_NAME,
         botName: BOT_NAME,
         timestamp: new Date().toISOString(),
         closingMessage: CLOSING_SCRIPT,
-        reason,
         conversationLog,
       };
       postToWebhook(LEAD_WEBHOOK_URL, payload);
     }
 
+    // סגירת החיבורים – Twilio יסיים את השיחה ברגע שה-Stream נסגר
     if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
       openaiWs.close();
     }
-    if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
+    if (twilioWs.readyState === WebSocket.OPEN) {
       twilioWs.close();
     }
   }
@@ -251,13 +294,6 @@ wss.on('connection', (twilioWs) => {
 - אסור לתת מידע מפורט או להמליץ על חברות / שירותים מתחרים ספציפיים.
 - אם שואלים על חברה מתחרה, אמרו בעדינות שאתם לא נותנים מידע שיווקי על ספקים אחרים ותמקדו את השיחה במה שמיסטר בוט מציעה.
 
-זמן שקט:
-- אם יש שקט ארוך ואתם מקבלים בקשה מהמערכת לבדוק אם הלקוח עדיין על הקו,
-  שאלו בקצרה: "אני עדיין כאן, אתם איתי על הקו? אם אתם צריכים עוד משהו תגידו לי בבקשה."
-- אם אחרי ההודעה הזו עדיין יש שקט והמערכת מבקשת מכם לסיים,
-  סיימו את השיחה במשפט סיום נעים וקצר בעברית, בסגנון:
-  "${CLOSING_SCRIPT}"
-
 ידע עסקי:
 ${BUSINESS_PROMPT || '(אין כרגע מידע עסקי נוסף)'}
 
@@ -268,7 +304,12 @@ ${ENABLE_LEAD_CAPTURE ? `
 - אם זה לקוח קיים: ${EXISTING_LEAD_PROMPT}
 - בסיום שיחה שבה נאספו פרטים, סיימו במשפט קצר שמסכם את הפרטים (שם, טלפון, סוג הפנייה).
 ` : ''}
-`.trim();
+
+שקט:
+- אם יש שקט ארוך מצד הלקוח, אפשר להגיד בנימוס משהו כמו:
+"אני עדיין כאן על הקו, אתם איתי?".
+- אם אחרי זה עדיין אין תגובה, אפשר לסיים את השיחה במשפט פרידה קצר.
+      `.trim();
 
       const finalSystemPrompt =
         (GENERAL_PROMPT && GENERAL_PROMPT.trim()) ||
@@ -327,53 +368,95 @@ ${ENABLE_LEAD_CAPTURE ? `
       openaiWs.send(JSON.stringify(greeting));
       console.log('📢 Greeting response.create sent');
 
-      // הפעלת טיימר שקט
-      lastUserMediaTs = Date.now();
-      idleWarningSent = false;
-
+      // טיימר לבדיקת שקט + מגבלת זמן שיחה
       idleInterval = setInterval(() => {
-        if (!openaiReady || callEnded) return;
         const now = Date.now();
-        const silenceMs = now - lastUserMediaTs;
+        const idleMs = now - lastMediaTs;
+        const callMs = now - callStartTs;
 
-        // אזהרה ראשונה – "אתם עדיין על הקו?"
-        if (!idleWarningSent && silenceMs >= IDLE_WARNING_MS) {
+        // אזהרת שקט
+        if (!idleWarningSent && idleMs >= IDLE_WARNING_MS && !closingStarted) {
           idleWarningSent = true;
-          console.log('⏰ Idle warning – sending "are you still there" message');
-
-          const stillThere = {
-            type: 'response.create',
-            response: {
-              instructions: `
-שאלי בנימוס אם הלקוח עדיין על הקו, בסגנון:
-"אני עדיין כאן, אתם איתי על הקו? אם אתם צריכים עוד משהו תגידו לי בבקשה. אם לא, אסיים את השיחה עוד רגע."
-              `.trim(),
-            },
-          };
-          openaiWs.send(JSON.stringify(stillThere));
+          console.log('⏳ Idle warning triggered');
+          if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
+            const warn = {
+              type: 'response.create',
+              response: {
+                instructions: `
+לא שמעתי אתכם כמה רגעים. 
+תגידו לי אם אתם עדיין על הקו, ואם יש משהו נוסף שתרצו שאעזור בו.
+                `.trim(),
+              },
+            };
+            openaiWs.send(JSON.stringify(warn));
+          }
         }
 
-        // ניתוק אוטומטי אחרי אזהרה ושקט מתמשך
-        if (idleWarningSent && silenceMs >= IDLE_HANGUP_MS) {
-          console.log('⏰ Idle timeout reached – sending goodbye and ending call');
-
-          const goodbye = {
-            type: 'response.create',
-            response: {
-              instructions: `
-סיימי את השיחה במשפט סיום נעים וקצר בעברית בסגנון:
-"${CLOSING_SCRIPT}"
-              `.trim(),
-            },
-          };
-          openaiWs.send(JSON.stringify(goodbye));
-
-          // נותנים לזמן הדיבור לצאת החוצה ואז מסיימים את השיחה
-          setTimeout(() => {
-            endCall('idle-timeout');
-          }, HANGUP_GRACE_MS);
+        // ניתוק אחרי שקט ממושך
+        if (
+          idleMs >= IDLE_HANGUP_MS &&
+          !closingStarted &&
+          HANGUP_AFTER_GOODBYE
+        ) {
+          closingStarted = true;
+          console.log('🛑 Idle hangup triggered');
+          if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
+            const bye = {
+              type: 'response.create',
+              response: {
+                instructions: `
+לא נשמע שיש עוד מישהו על הקו, אז אסיים את השיחה.
+${CLOSING_SCRIPT}
+                `.trim(),
+              },
+            };
+            openaiWs.send(JSON.stringify(bye));
+          }
+          setTimeout(() => endCall('idle_timeout'), HANGUP_GRACE_MS);
         }
-      }, 2000);
+
+        // אזהרה לפני סוף 5 דקות
+        if (
+          !maxTimeWarningSent &&
+          callMs >= (MAX_CALL_MS - MAX_WARN_BEFORE_MS) &&
+          callMs < MAX_CALL_MS &&
+          !closingStarted
+        ) {
+          maxTimeWarningSent = true;
+          console.log('⏳ Max-call warning triggered');
+          if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
+            const warnTime = {
+              type: 'response.create',
+              response: {
+                instructions: `
+אנחנו מתקרבים לסיום חמש הדקות של השיחה.
+אם תרצו להתקדם, תוכלו עכשיו לסכם איתי בקצרה שם, עסק ומספר טלפון ואדאג שיעברו אליכם להמשך.
+                `.trim(),
+              },
+            };
+            openaiWs.send(JSON.stringify(warnTime));
+          }
+        }
+
+        // ניתוק אחרי מקסימום זמן
+        if (callMs >= MAX_CALL_MS && !closingStarted) {
+          closingStarted = true;
+          console.log('🛑 Max-call hangup triggered');
+          if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
+            const byeTime = {
+              type: 'response.create',
+              response: {
+                instructions: `
+אני צריכה לסיים את השיחה בגלל מגבלת הזמן.
+${CLOSING_SCRIPT}
+                `.trim(),
+              },
+            };
+            openaiWs.send(JSON.stringify(byeTime));
+          }
+          setTimeout(() => endCall('max_call_time'), HANGUP_GRACE_MS);
+        }
+      }, 1000);
     });
 
     openaiWs.on('message', (data) => {
@@ -403,11 +486,30 @@ ${ENABLE_LEAD_CAPTURE ? `
       }
 
       // תמלול מלא של מה שהלקוח אמר
-      if (msg.type === 'conversation.item.input_audio_transcription.completed') {
+      if (
+        msg.type === 'conversation.item.input_audio_transcription.completed'
+      ) {
         const transcript = msg.transcript;
         if (transcript) {
           console.log('👂 User said:', transcript);
           conversationLog.push({ from: 'user', text: transcript });
+
+          // זיהוי פרידה → פרידה + ניתוק
+          if (!goodbyeHandled && isGoodbye(transcript) && HANGUP_AFTER_GOODBYE) {
+            goodbyeHandled = true;
+            closingStarted = true;
+            console.log('👋 User goodbye detected – closing call');
+            if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
+              const bye = {
+                type: 'response.create',
+                response: {
+                  instructions: CLOSING_SCRIPT.trim(),
+                },
+              };
+              openaiWs.send(JSON.stringify(bye));
+            }
+            setTimeout(() => endCall('user_goodbye'), HANGUP_GRACE_MS);
+          }
         }
       }
 
@@ -468,7 +570,7 @@ ${ENABLE_LEAD_CAPTURE ? `
     if (event === 'start') {
       streamSid = data.start.streamSid;
       console.log('▶️ Stream started, streamSid:', streamSid);
-      lastUserMediaTs = Date.now();
+      lastMediaTs = Date.now();
     }
 
     if (event === 'media') {
@@ -476,13 +578,12 @@ ${ENABLE_LEAD_CAPTURE ? `
       const payload = data.media && data.media.payload;
       if (!payload) return;
 
-      // עדכון זמן פעילות אחרון – יש דיבור
-      lastUserMediaTs = Date.now();
+      // מרענן טיימר שקט
+      lastMediaTs = Date.now();
 
       if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
         const openaiAudioMsg = {
-          // חשוב: הפורמט התקין
-          type: 'input_audio_buffer.append',
+          type: 'input_audio_buffer.append', // חשוב – מה שעבד לנו
           audio: payload,
         };
         openaiWs.send(JSON.stringify(openaiAudioMsg));
@@ -490,19 +591,19 @@ ${ENABLE_LEAD_CAPTURE ? `
     }
 
     if (event === 'stop') {
-      console.log('⏹️ Stream stopped (Twilio stop event)');
-      endCall('twilio-stop');
+      console.log('⏹️ Stream stopped (Twilio)');
+      endCall('twilio_stop');
     }
   });
 
   twilioWs.on('close', () => {
     console.log('☎️ Twilio WebSocket closed');
-    endCall('twilio-ws-close');
+    endCall('twilio_ws_close');
   });
 
   twilioWs.on('error', (err) => {
     console.error('❌ Twilio WebSocket error:', err);
-    endCall('twilio-ws-error');
+    endCall('twilio_ws_error');
   });
 });
 
