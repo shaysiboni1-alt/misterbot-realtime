@@ -1,140 +1,35 @@
 // server.js
 // MisterBot <-> Twilio <-> OpenAI Realtime bridge (אודיו בזמן אמת)
 
-// ===================== SETUP בסיסי =====================
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 
-// ===== משתני סביבה =====
+// ====== ENV VARS – מגיעים מ-Render ======
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// אופציונלי – לעתיד עם ElevenLabs
+// אפשרי לעתיד (כרגע לא בשימוש)
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
+
+// פרומפט כללי על הבוט – אם לא הגדרת ב-ENV יהיה טקסט ברירת מחדל
+const BOT_SYSTEM_PROMPT =
+  process.env.BOT_SYSTEM_PROMPT ||
+  `
+אתם עוזר קולי בשם "נטע" עבור שירות האוטומציה לעסקים "MisterBot".
+תמיד דברו בעברית (אם הלקוח לא ביקש שפה אחרת), בפנייה בלשון רבים (אתכם),
+בטון נעים, אנושי, קצר וענייני.
+ענו על שאלות לגבי בוטים קוליים, תזכורות, קביעת תורים, מענה לשיחות ועוד.
+אל תתנו מידע או המלצות על חברות מתחרות בתחום האוטומציה הקולית.
+אם שואלים ישירות על מתחרים – אמרו בעדינות שאינכם יכולים לענות על זה
+ותחזרו להדגיש את היתרונות של MisterBot.
+`.trim();
 
 if (!OPENAI_API_KEY) {
   console.error('❌ OPENAI_API_KEY is missing! Make sure it is set in Render env.');
 }
 
-// ===== קריאה נוחה מה-ENV עם ברירת מחדל =====
-function envOrDefault(name, fallback) {
-  const v = process.env[name];
-  if (v === undefined || v === null || v === '') return fallback;
-  return v;
-}
-
-function parseQuestions(envValue, fallbackArray) {
-  const raw = envOrDefault(envValue, null);
-  if (!raw) return fallbackArray;
-  return raw
-    .split('|')
-    .map(q => q.trim())
-    .filter(q => q.length > 0);
-}
-
-// ===== קונפיגורציה דרך ENV =====
-const CONFIG = {
-  MODEL: envOrDefault('MB_OPENAI_MODEL', 'gpt-4o-realtime-preview-2024-12-17'),
-
-  BOT_NAME: envOrDefault('MB_BOT_NAME', 'נטע'),
-  BUSINESS_NAME: envOrDefault('MB_BUSINESS_NAME', 'MisterBot'),
-
-  OPENING_SCRIPT: envOrDefault(
-    'MB_OPENING_SCRIPT',
-    'שלום, הגעתם למיסטר בוט – מערכת אוטומציה חכמה לעסקים. שמי נטע, איך אפשר לעזור לכם היום?'
-  ),
-
-  CLOSING_SCRIPT: envOrDefault(
-    'MB_CLOSING_SCRIPT',
-    'תודה שפניתם למיסטר בוט. שיהיה לכם המשך יום נעים, ולהתראות.'
-  ),
-
-  BUSINESS_KB_PROMPT: envOrDefault(
-    'MB_BUSINESS_PROMPT',
-    'את מבוססת על שירות אוטומציה לעסקים בשם MisterBot, שמספק בוטים קוליים וצ׳אט חכמים, קביעת תורים, מענה לשיחות, ותהליכי אוטומציה עסקיים.'
-  ),
-
-  GENERAL_BEHAVIOR_PROMPT: envOrDefault(
-    'MB_GENERAL_PROMPT',
-    `
-את עוזרת קולית אנושית, חמה ועניינית.
-את תמיד:
-• מדברת בטון נעים, לא רובוטי.
-• שומרת על תשובות קצרות וברורות.
-• פונה בלשון רבים (אתם).
-• אם יש צורך, שואלת שאלה אחת בכל פעם.
-• לעולם אינך נותנת מידע על חברות מתחרות בתחום הבוטים, מענה טלפוני או אוטומציה.
-`.trim()
-  ),
-
-  LANGUAGES: envOrDefault('MB_LANGUAGES', 'he,en,ru'),
-  SPEECH_SPEED: envOrDefault('MB_SPEECH_SPEED', 'רגילה'), // טקסט חופשי שנכנס לפרומפט
-
-  NEW_LEAD_QUESTIONS: parseQuestions('MB_NEW_LEAD_QUESTIONS', [
-    'מה שמך המלא?',
-    'מה מספר הטלפון שלך?',
-    'מה שם העסק שלך?',
-    'באיזה שירות אתם מעוניינים?',
-    'מאיפה הגעתם אלינו?'
-  ]),
-
-  EXISTING_CLIENT_QUESTIONS: parseQuestions('MB_EXISTING_CLIENT_QUESTIONS', [
-    'מה שמך המלא?',
-    'מה מספר הטלפון שלך?',
-    'איך אפשר לעזור לכם היום?',
-    'האם יש מספר הזמנה או תור שתרצו להתייחס אליו?'
-  ]),
-
-  WEBHOOK_URL: envOrDefault('MB_WEBHOOK_URL', ''),
-
-  // הגדרות זיהוי "סוף דיבור"
-  VAD_THRESHOLD: parseFloat(envOrDefault('MB_VAD_THRESHOLD', '0.5')),
-  VAD_SILENCE_MS: parseInt(envOrDefault('MB_VAD_SILENCE_MS', '600'), 10),
-  VAD_PREFIX_MS: parseInt(envOrDefault('MB_VAD_PREFIX_MS', '300'), 10),
-};
-
-// ===== פרומפט הוראות מרכזי שנבנה מה-ENV =====
-function buildInstructions() {
-  return `
-את עוזרת קולית בשם "${CONFIG.BOT_NAME}" עבור שירות אוטומציה לעסקים "${CONFIG.BUSINESS_NAME}".
-${CONFIG.BUSINESS_KB_PROMPT}
-
-${CONFIG.GENERAL_BEHAVIOR_PROMPT}
-
-שפות:
-• השפה הראשית היא עברית.
-• את יכולה לדבר גם באנגלית וברוסית בהתאם לשפה שבה הלקוח מדבר.
-(${CONFIG.LANGUAGES})
-
-מהירות דיבור:
-• מהירות הדיבור שלך היא: ${CONFIG.SPEECH_SPEED}.
-אם הלקוח נשמע מבולבל, את יכולה להאט מעט ולחזור במשפט פשוט יותר.
-
-פתיח:
-• בתחילת השיחה השתמשי בניסוח הבא (אפשר לשנות מעט לפי ההקשר):
-"${CONFIG.OPENING_SCRIPT}"
-
-סגירת שיחה:
-• כאשר הלקוח מסיים, או מבקש לסיים, השתמשי בניסוח הסגירה:
-"${CONFIG.CLOSING_SCRIPT}"
-
-איסוף פרטי לקוח חדש:
-• אם הלקוח אומר שהוא פונה בפעם הראשונה, שאלי את השאלות הבאות, אחת אחת, וודאי שקיבלת תשובה ברורה:
-${CONFIG.NEW_LEAD_QUESTIONS.map(q => `- ${q}`).join('\n')}
-
-איסוף פרטי לקוח קיים:
-• אם הלקוח אומר שהוא כבר לקוח קיים, שאלי את השאלות הבאות, אחת אחת:
-${CONFIG.EXISTING_CLIENT_QUESTIONS.map(q => `- ${q}`).join('\n')}
-
-תמיד:
-• אל תתני מידע על חברות מתחרות בתחום שלך.
-• שמרי על שיחה זורמת וטבעית.
-• אל תתנצלי יותר מדי – פעם אחת מספיקה.
-`.trim();
-}
-
-// ===== אפליקציית Express בסיסית =====
+// ====== EXPRESS בסיסי ======
 const app = express();
 app.get('/', (req, res) => {
   res.send('MisterBot realtime server is running.');
@@ -142,9 +37,7 @@ app.get('/', (req, res) => {
 
 const server = http.createServer(app);
 
-// ===================== WebSocket לטוויליו =====================
-
-// Twilio יחובר לנתיב הזה כ-Media Stream WebSocket
+// ====== WebSocket ל-Twilio Media Streams ======
 const wss = new WebSocket.Server({ server, path: '/twilio-media-stream' });
 
 console.log('✅ MisterBot Realtime bridge starting up...');
@@ -155,15 +48,13 @@ wss.on('connection', (twilioWs) => {
   let streamSid = null;
   let openaiWs = null;
   let openaiReady = false;
-  let isBotSpeaking = false; // כדי לא לאפשר "קטיעה" – מתעלמים מדיבור של הלקוח בזמן שהבוט מדבר
 
-  // ---------- פותחים חיבור ל-OpenAI Realtime ----------
+  // ---------- חיבור ל-OpenAI Realtime ----------
   function connectToOpenAI() {
     console.log('🔌 Connecting to OpenAI Realtime...');
 
-    const openaiUrl = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
-      CONFIG.MODEL
-    )}`;
+    const openaiUrl =
+      'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17';
 
     openaiWs = new WebSocket(openaiUrl, {
       headers: {
@@ -176,25 +67,23 @@ wss.on('connection', (twilioWs) => {
       console.log('✅ OpenAI Realtime connected');
       openaiReady = true;
 
-      const instructions = buildInstructions();
-
-      // מגדירים את הסשן: אודיו g711-ulaw (תואם Twilio), ו-VAD בצד השרת
+      // שים לב: g711_ulaw (עם קו תחתון!) כדי להתאים ל־Twilio
       const sessionUpdate = {
         type: 'session.update',
         session: {
-          instructions,
-          voice: 'alloy', // קול ברירת מחדל של OpenAI – כרגע לא משתמשים ב-ElevenLabs
+          instructions: BOT_SYSTEM_PROMPT,
+          voice: 'alloy',
           modalities: ['audio', 'text'],
-          input_audio_format: 'g711-ulaw',
-          output_audio_format: 'g711-ulaw',
+          input_audio_format: 'g711_ulaw',
+          output_audio_format: 'g711_ulaw',
           input_audio_transcription: {
             model: 'whisper-1',
           },
           turn_detection: {
             type: 'server_vad',
-            threshold: CONFIG.VAD_THRESHOLD,
-            silence_duration_ms: CONFIG.VAD_SILENCE_MS,
-            prefix_padding_ms: CONFIG.VAD_PREFIX_MS,
+            threshold: 0.5,
+            silence_duration_ms: 600,
+            prefix_padding_ms: 300,
           },
           max_response_output_tokens: 'inf',
         },
@@ -213,14 +102,10 @@ wss.on('connection', (twilioWs) => {
         return;
       }
 
+      // אם תרצה – פתח את זה לדיבוג:
       // console.log('🔁 OpenAI event:', msg.type);
 
-      // התחלת אודיו מהבוט – מסמנים שהוא מדבר, כדי לא לשלוח אודיו של הלקוח במקביל
-      if (msg.type === 'response.output_audio_started') {
-        isBotSpeaking = true;
-      }
-
-      // שולחים אודיו החוצה לטוויליו
+      // אודיו מהבוט → החוצה לטלפוניה
       if (
         msg.type === 'response.audio.delta' &&
         msg.delta &&
@@ -231,7 +116,7 @@ wss.on('connection', (twilioWs) => {
           event: 'media',
           streamSid,
           media: {
-            // OpenAI מחזיר base64 של g711-ulaw – מתאים בדיוק למה שטוויליו רוצה
+            // OpenAI מחזיר base64 של g711_ulaw – בדיוק מה שטוויליו מחפש
             payload: msg.delta,
           },
         };
@@ -240,41 +125,31 @@ wss.on('connection', (twilioWs) => {
 
       if (msg.type === 'response.completed') {
         console.log('✅ OpenAI response completed');
-        // סיום דיבור הבוט – אפשר שוב להקשיב ללקוח
-        isBotSpeaking = false;
       }
 
       if (msg.type === 'conversation.item.input_audio_transcription.completed') {
-        // תמלול מלא של מה שהלקוח אמר
         const transcript = msg.transcript;
         if (transcript) {
           console.log('👂 User said:', transcript);
         }
-      }
-
-      if (msg.type === 'response.output_text.delta' && msg.delta) {
-        // חלקי טקסט של תשובת הבוט – ללוג בלבד אם תרצה
-        // console.log('🧾 Bot partial:', msg.delta);
       }
     });
 
     openaiWs.on('close', () => {
       console.log('🔌 OpenAI Realtime connection closed');
       openaiReady = false;
-      isBotSpeaking = false;
     });
 
     openaiWs.on('error', (err) => {
       console.error('❌ OpenAI Realtime error:', err);
       openaiReady = false;
-      isBotSpeaking = false;
     });
   }
 
-  // מחברים לאופן-איי מיד כשהחיבור של טוויליו נפתח
+  // מתחברים ל-OpenAI כש-Twilio נפתח
   connectToOpenAI();
 
-  // ---------- הודעות נכנסות מטוויליו ----------
+  // ---------- הודעות מטוויליו ----------
   twilioWs.on('message', (msg) => {
     let data;
     try {
@@ -292,13 +167,10 @@ wss.on('connection', (twilioWs) => {
     }
 
     if (event === 'media') {
-      // פה מגיע אודיו מהלקוח (base64 של g711-ulaw)
+      // אודיו מהלקוח אלינו
       const payload = data.media.payload;
-
-      // אם הבוט מדבר כרגע – מתעלמים מהקלט, כדי שלא תהיה "קטיעה"
-      if (isBotSpeaking) {
-        return;
-      }
+      // דיבוג – לראות שיש תנועה:
+      // console.log('🎧 Twilio media frame received (len)', payload.length);
 
       if (
         openaiWs &&
@@ -311,10 +183,6 @@ wss.on('connection', (twilioWs) => {
         };
         openaiWs.send(JSON.stringify(openaiAudioMsg));
       }
-    }
-
-    if (event === 'mark') {
-      console.log('📍 Twilio mark:', data.mark.name);
     }
 
     if (event === 'stop') {
@@ -342,7 +210,7 @@ wss.on('connection', (twilioWs) => {
   });
 });
 
-// ===================== RUN SERVER =====================
+// ====== RUN SERVER ======
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
   console.log(`🚀 MisterBot Realtime server listening on port ${PORT}`);
