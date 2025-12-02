@@ -15,17 +15,25 @@ const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
 // ספק ה-TTS: openai (כמו היום) או eleven (ElevenLabs)
 const TTS_PROVIDER = (process.env.TTS_PROVIDER || 'openai').toLowerCase();
 
-// ElevenLabs TTS – שמות תואמים ל-ENV שלך
+// ElevenLabs TTS
+// שים לב: קורא גם מהמפתחות ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID כפי שהגדרת ב-ENV
 const ELEVEN_API_KEY =
-  process.env.ELEVENLABS_API_KEY || process.env.ELEVEN_API_KEY || '';
+  process.env.ELEVEN_API_KEY ||
+  process.env.ELEVENLABS_API_KEY ||
+  '';
+
 const ELEVEN_VOICE_ID =
-  process.env.ELEVENLABS_VOICE_ID || process.env.ELEVEN_VOICE_ID || '';
+  process.env.ELEVEN_VOICE_ID ||
+  process.env.ELEVENLABS_VOICE_ID ||
+  '';
+
 const ELEVEN_MODEL_ID =
   process.env.ELEVEN_MODEL_ID || 'eleven_multilingual_v2';
-const ELEVEN_OPTIMIZE_STREAMING = parseInt(
-  process.env.ELEVEN_OPTIMIZE_STREAMING || '2',
-  10
-);
+
+const ELEVEN_OPTIMIZE_STREAMING =
+  parseInt(process.env.ELEVEN_OPTIMIZE_STREAMING || '2', 10);
+
+// פורמט יציאה – ברירת מחדל ulaw_8000 שמתאים לטוויליו
 const ELEVEN_OUTPUT_FORMAT =
   process.env.ELEVEN_OUTPUT_FORMAT || 'ulaw_8000';
 
@@ -207,9 +215,7 @@ async function ttsWithEleven(text) {
     return null;
   }
 
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}?output_format=${encodeURIComponent(
-    ELEVEN_OUTPUT_FORMAT
-  )}&optimize_streaming_latency=${ELEVEN_OPTIMIZE_STREAMING}`;
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}?output_format=${ELEVEN_OUTPUT_FORMAT}&optimize_streaming_latency=${ELEVEN_OPTIMIZE_STREAMING}`;
 
   try {
     const res = await fetch(url, {
@@ -503,28 +509,31 @@ ${ENABLE_LEAD_CAPTURE ? `
         (GENERAL_PROMPT && GENERAL_PROMPT.trim()) ||
         defaultSystemPrompt;
 
+      // הגדרות session ל-Realtime
+      const sessionConfig = {
+        instructions: finalSystemPrompt,
+        modalities: ['audio', 'text'],
+        input_audio_format: 'g711_ulaw',
+        output_audio_format: 'g711_ulaw',
+        input_audio_transcription: {
+          model: 'whisper-1',
+        },
+        turn_detection: {
+          type: 'server_vad',
+          threshold: TURN_THRESHOLD,
+          silence_duration_ms: TURN_SILENCE_MS,
+          prefix_padding_ms: TURN_PREFIX_MS,
+        },
+        max_response_output_tokens: MAX_OUTPUT_TOKENS,
+      };
+
+      // אם אנחנו במצב Eleven, עדיין משאירים מודל גם לאודיו (לא מפריע),
+      // אבל האודיו שיוצא מאופן-איי לא נשלח לטוויליו – אנחנו משתמשים רק בטקסט.
+      sessionConfig.voice = OPENAI_VOICE;
+
       const sessionUpdate = {
         type: 'session.update',
-        session: {
-          instructions: finalSystemPrompt,
-          voice: OPENAI_VOICE,
-          modalities: ['audio', 'text'],
-
-          // חשוב: פורמט שתואם לטוויליו (מה שעבד לנו)
-          input_audio_format: 'g711_ulaw',
-          output_audio_format: 'g711_ulaw',
-
-          input_audio_transcription: {
-            model: 'whisper-1',
-          },
-          turn_detection: {
-            type: 'server_vad',
-            threshold: TURN_THRESHOLD,
-            silence_duration_ms: TURN_SILENCE_MS,
-            prefix_padding_ms: TURN_PREFIX_MS,
-          },
-          max_response_output_tokens: MAX_OUTPUT_TOKENS,
-        },
+        session: sessionConfig,
       };
 
       openaiWs.send(JSON.stringify(sessionUpdate));
