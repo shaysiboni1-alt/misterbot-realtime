@@ -7,10 +7,11 @@
 // - שיחה בעברית כברירת מחדל, לשון רבים, טון חם וקצר.
 // - שליטה מלאה דרך ENV (פתיח, סגיר, פרומפט כללי, KB עסקי, טיימרים, לידים, VAD).
 // - טיימר שקט + ניתוק אוטומטי + מקסימום זמן שיחה.
-// - לוג שיחה + וובהוק לידים (אם מופעל).
+// - לוג שיחה + וובהוק לידים (אם מופעל) + PARSING חכם ללידים.
 //
 // דרישות:
 //   npm install express ws dotenv
+//   (מומלץ Node 18+ כדי ש-fetch יהיה זמין גלובלית)
 //
 // להרצה (למשל):
 //   PORT=3000 node server.js
@@ -82,12 +83,18 @@ const MB_VAD_PREFIX_MS = envNumber('MB_VAD_PREFIX_MS', 300);
 // Idle / Duration
 const MB_IDLE_WARNING_MS = envNumber('MB_IDLE_WARNING_MS', 40000); // 40 שניות
 const MB_IDLE_HANGUP_MS = envNumber('MB_IDLE_HANGUP_MS', 90000);  // 90 שניות
-const MB_MAX_CALL_MS = envNumber('MB_MAX_CALL_MS', 5 * 60 * 1000); // ברירת מחדל 5 דקות
+// מגבלת זמן שיחה – ברירת מחדל 5 דקות (אפשר לשנות ב-ENV אם תרצה)
+const MB_MAX_CALL_MS = envNumber('MB_MAX_CALL_MS', 5 * 60 * 1000);
 const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000); // 45 שניות לפני הסוף
+const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 3000); // זמן המתנה אחרי פרידה לפני ניתוק בכוח
 
 // לידים / וובהוק
 const MB_ENABLE_LEAD_CAPTURE = envBool('MB_ENABLE_LEAD_CAPTURE', false);
 const MB_WEBHOOK_URL = process.env.MB_WEBHOOK_URL || '';
+
+// PARSING חכם ללידים
+const MB_ENABLE_SMART_LEAD_PARSING = envBool('MB_ENABLE_SMART_LEAD_PARSING', true);
+const MB_LEAD_PARSING_MODEL = process.env.MB_LEAD_PARSING_MODEL || 'gpt-4.1-mini';
 
 // Debug
 const MB_DEBUG = envBool('MB_DEBUG', false);
@@ -223,6 +230,115 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/twilio-media-stream' });
 
 // -----------------------------
+// Smart lead parsing helper
+// -----------------------------
+async function extractLeadFromConversation(conversationLog) {
+  const tag = 'LeadParse';
+
+  if (!MB_ENABLE_SMART_LEAD_PARSING) {
+    logDebug(tag, 'Smart lead parsing disabled via ENV.');
+    return null;
+  }
+
+  if (!OPENAI_API_KEY) {
+    logError(tag, 'Missing OPENAI_API_KEY for lead parsing.');
+    return null;
+  }
+
+  if (!Array.isArray(conversationLog) || conversationLog.length === 0) {
+    logDebug(tag, 'Empty conversationLog – skipping lead parsing.');
+    return null;
+  }
+
+  try {
+    const conversationText = conversationLog
+      .map((m) => `${m.from === 'user' ? 'לקוח' : BOT_NAME}: ${m.text}`)
+      .join('\n');
+
+    const systemPrompt = `
+אתה מנתח שיחות טלפון בעברית בין לקוח לבין בוט שירות.
+תפקידך להוציא JSON אחד בלבד שתואם בדיוק לסכמה הבאה:
+
+{
+  "is_lead": boolean,
+  "lead_type": "new" | "existing" | "unknown",
+  "full_name": string | null,
+  "business_name": string | null,
+  "phone_number": string | null,
+  "reason": string | null,
+  "notes": string | null
+}
+
+הסברים:
+- "is_lead": true אם ברור שיש כאן פנייה עסקית / התעניינות בשירות / הזמנת שירות. אחרת false.
+- "lead_type": "new" אם מדובר בלקוח חדש, "existing" אם הוא מציין שהוא לקוח קיים, אחרת "unknown".
+- "full_name": אם הלקוח נותן שם (פרטי או מלא) – כתוב כפי שנשמע. אם לא ברור – null.
+- "business_name": אם הלקוח מזכיר שם עסק – כתוב כפי שנשמע. אחרת null.
+- "phone_number": אם בשיחה מופיע מספר טלפון של הלקוח – החזר אותו כרצף ספרות בלבד, בלי רווחים ובלי +972 ובלי להוריד 0 בהתחלה.
+  אם נשמע כמה מספרים – בחר את המספר הרלוונטי ביותר ליצירת קשר, אחרת null.
+- "reason": תיאור קצר וקולע בעברית של סיבת הפנייה (משפט אחד קצר).
+- "notes": כל דבר נוסף שיכול להיות רלוונטי לאיש מכירות / שירות (למשל: "מעוניין בדמו לבוט קולי", "פנייה דחופה", "שאל על מחירים" וכו').
+
+החזר אך ורק JSON תקין לפי הסכמה, בלי טקסט נוסף, בלי הסברים ובלי הערות.
+`.trim();
+
+    const userPrompt = `
+להלן תמלול שיחה בין לקוח ובוט שירות בשם "${BOT_NAME}" עבור העסק "${BUSINESS_NAME}".
+
+תמלול:
+${conversationText}
+`.trim();
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: MB_LEAD_PARSING_MODEL,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      logError(tag, `OpenAI lead parsing HTTP ${response.status}`, text);
+      return null;
+    }
+
+    const data = await response.json();
+    const raw = data.choices?.[0]?.message?.content;
+    if (!raw) {
+      logError(tag, 'No content in lead parsing response.');
+      return null;
+    }
+
+    let parsed = null;
+    try {
+      parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (e) {
+      parsed = raw;
+    }
+
+    if (typeof parsed !== 'object' || parsed === null) {
+      logError(tag, 'Parsed lead is not an object.', parsed);
+      return null;
+    }
+
+    logInfo(tag, 'Lead parsed successfully.', parsed);
+    return parsed;
+  } catch (err) {
+    logError(tag, 'Error in extractLeadFromConversation', err);
+    return null;
+  }
+}
+
+// -----------------------------
 // Per-call handler
 // -----------------------------
 wss.on('connection', (connection, req) => {
@@ -239,7 +355,6 @@ wss.on('connection', (connection, req) => {
   let streamSid = null;
   let callSid = null;
 
-  // Realtime WS to OpenAI
   const openAiWs = new WebSocket(
     'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17',
     {
@@ -250,7 +365,6 @@ wss.on('connection', (connection, req) => {
     }
   );
 
-  // שדות לניהול שיחה / טיימרים / לוג
   let conversationLog = []; // [{ from: 'user'|'bot', text }]
   let currentBotText = '';
   let callStartTs = Date.now();
@@ -258,7 +372,7 @@ wss.on('connection', (connection, req) => {
   let idleCheckInterval = null;
   let maxCallTimeout = null;
   let pendingHangup = null; // { reason, closingMessage }
-  let idleWarningSent = false;
+  let hangupGraceTimeout = null; // טיימר ניתוק לאחר פרידה
   let openAiReady = false;
   let twilioClosed = false;
   let openAiClosed = false;
@@ -272,6 +386,8 @@ wss.on('connection', (connection, req) => {
       return;
     }
     try {
+      const parsedLead = await extractLeadFromConversation(conversationLog);
+
       const payload = {
         streamSid,
         callSid,
@@ -282,7 +398,8 @@ wss.on('connection', (connection, req) => {
         durationMs: Date.now() - callStartTs,
         reason,
         closingMessage,
-        conversationLog
+        conversationLog,
+        parsedLead
       };
 
       logInfo(tag, `Sending lead webhook to ${MB_WEBHOOK_URL}`);
@@ -308,6 +425,7 @@ wss.on('connection', (connection, req) => {
 
     if (idleCheckInterval) clearInterval(idleCheckInterval);
     if (maxCallTimeout) clearTimeout(maxCallTimeout);
+    if (hangupGraceTimeout) clearTimeout(hangupGraceTimeout);
 
     await sendLeadWebhook(reason, closingMessage || MB_CLOSING_SCRIPT);
 
@@ -332,7 +450,6 @@ wss.on('connection', (connection, req) => {
     }
     pendingHangup = { reason, closingMessage: closingMessage || MB_CLOSING_SCRIPT };
 
-    // מבקשים מהמודל להגיד את משפט הסיום
     if (openAiWs.readyState === WebSocket.OPEN) {
       const text = pendingHangup.closingMessage || MB_CLOSING_SCRIPT;
       const item = {
@@ -351,6 +468,18 @@ wss.on('connection', (connection, req) => {
       openAiWs.send(JSON.stringify(item));
       openAiWs.send(JSON.stringify({ type: 'response.create' }));
       logInfo(tag, `Scheduled hangup with closing message: ${text}`);
+
+      // ניתוק בטוח לאחר MB_HANGUP_GRACE_MS גם אם לא קיבלנו response.done
+      if (!hangupGraceTimeout && MB_HANGUP_GRACE_MS > 0) {
+        hangupGraceTimeout = setTimeout(() => {
+          if (pendingHangup) {
+            const { reason: r, closingMessage: cm } = pendingHangup;
+            logInfo(tag, `Hangup grace timeout reached (${MB_HANGUP_GRACE_MS} ms), forcing endCall.`);
+            pendingHangup = null;
+            endCall(r, cm);
+          }
+        }, MB_HANGUP_GRACE_MS);
+      }
     } else {
       // אם אין חיבור למודל – מנתקים מיד
       endCall(reason, closingMessage);
@@ -374,6 +503,7 @@ wss.on('connection', (connection, req) => {
       'להתראות',
       'ביי',
       'ביי ביי',
+      'יאללה ביי',
       'תודה רבה',
       'תודה, זהו',
       'תודה, זה הכל',
@@ -390,6 +520,8 @@ wss.on('connection', (connection, req) => {
   // -----------------------------
   // Helper: הודעת "אתם עדיין איתי?"
   // -----------------------------
+  let idleWarningSent = false;
+
   function sendIdleWarningIfNeeded() {
     if (idleWarningSent) return;
     idleWarningSent = true;
@@ -445,7 +577,6 @@ wss.on('connection', (connection, req) => {
     logDebug(tag, 'Sending session.update to OpenAI.', sessionUpdate);
     openAiWs.send(JSON.stringify(sessionUpdate));
 
-    // פתיח – הבוט מדבר ראשון
     const greetingText = MB_OPENING_SCRIPT;
     const initialItem = {
       type: 'conversation.item.create',
@@ -483,7 +614,6 @@ wss.on('connection', (connection, req) => {
         logDebug(tag, 'Session updated', event);
         break;
 
-      // אודיו החוצה – לבוט
       case 'response.output_audio.delta':
       case 'response.audio.delta': {
         if (!event.delta) return;
@@ -498,7 +628,6 @@ wss.on('connection', (connection, req) => {
         break;
       }
 
-      // טקסט של הבוט (ללוג)
       case 'response.output_text.delta':
         if (typeof event.delta === 'string') {
           currentBotText += event.delta;
@@ -513,7 +642,6 @@ wss.on('connection', (connection, req) => {
           currentBotText = '';
         }
 
-        // אם מחכה ניתוק אחרי סיום – זה הזמן
         if (pendingHangup) {
           const { reason, closingMessage } = pendingHangup;
           pendingHangup = null;
@@ -521,7 +649,6 @@ wss.on('connection', (connection, req) => {
         }
         break;
 
-      // תמלול אודיו נכנס (הלקוח)
       case 'conversation.item.input_audio_transcription.completed':
       case 'response.audio_transcript.done': {
         const transcript =
@@ -541,7 +668,6 @@ wss.on('connection', (connection, req) => {
         break;
 
       default:
-        // שאר האירועים – רק לוג בדיבאג
         break;
     }
   });
@@ -579,7 +705,7 @@ wss.on('connection', (connection, req) => {
         lastMediaTs = Date.now();
         logInfo(tag, `Incoming stream started. streamSid=${streamSid}, callSid=${callSid}`);
 
-        // טיימר idle
+        // טיימר בדיקת שקט + מגבלת זמן שיחה (5 דקות)
         idleCheckInterval = setInterval(() => {
           const now = Date.now();
           const idleMs = now - lastMediaTs;
@@ -594,13 +720,16 @@ wss.on('connection', (connection, req) => {
             scheduleEndCall('idle_timeout', MB_CLOSING_SCRIPT);
           }
 
+          // אם עברנו את 5 הדקות – נפרדים ומנתקים
           if (MB_MAX_CALL_MS > 0 && callMs >= MB_MAX_CALL_MS) {
             logInfo(tag, `Max call duration reached (${callMs} ms), scheduling hangup.`);
-            scheduleEndCall('max_duration', MB_CLOSING_SCRIPT);
+            const finalText =
+              'הזמן שהוקצה לשיחה שלנו הסתיים, תודה שדיברתם איתי. נמשיך משלב זה מול נציג מטעם מיסטר בוט. יום נעים ולהתראות.';
+            scheduleEndCall('max_duration', finalText);
           }
         }, 1000);
 
-        // טיימר אזהרה לפני סיום שיחה (למשל 45 שניות לפני סוף 5 דקות)
+        // אזהרה לפני סוף 5 הדקות – לתת אפשרות להתקדם ולהשאיר פרטים
         if (MB_MAX_CALL_MS > 0 && MB_MAX_WARN_BEFORE_MS > 0) {
           const warnAt = MB_MAX_CALL_MS - MB_MAX_WARN_BEFORE_MS;
           if (warnAt > 0) {
@@ -636,14 +765,13 @@ wss.on('connection', (connection, req) => {
         if (openAiReady && openAiWs.readyState === WebSocket.OPEN) {
           const audioAppend = {
             type: 'input_audio_buffer.append',
-            audio: data.media.payload // Twilio שולח כבר כ-base64 של PCMU / G.711 μ-law
+            audio: data.media.payload
           };
           openAiWs.send(JSON.stringify(audioAppend));
         }
         break;
 
       case 'mark':
-        // אפשר להשתמש בזה בעתיד לקומיטים אם תבטל server_vad
         break;
 
       case 'stop':
@@ -665,6 +793,7 @@ wss.on('connection', (connection, req) => {
     }
     if (idleCheckInterval) clearInterval(idleCheckInterval);
     if (maxCallTimeout) clearTimeout(maxCallTimeout);
+    if (hangupGraceTimeout) clearTimeout(hangupGraceTimeout);
   });
 
   connection.on('error', (err) => {
