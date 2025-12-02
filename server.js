@@ -29,8 +29,10 @@ const CLOSING_SCRIPT =
   'תודה שפניתם למיסטר בוט, שיהיה לכם המשך יום נעים. להתראות.';
 
 // פרומפטים כלליים / עסקיים
-const GENERAL_PROMPT = process.env.MB_GENERAL_PROMPT || process.env.SYSTEM_PROMPT || '';
-const BUSINESS_PROMPT = process.env.MB_BUSINESS_PROMPT || process.env.BUSINESS_KB || '';
+const GENERAL_PROMPT =
+  process.env.MB_GENERAL_PROMPT || process.env.SYSTEM_PROMPT || '';
+const BUSINESS_PROMPT =
+  process.env.MB_BUSINESS_PROMPT || process.env.BUSINESS_KB || '';
 
 // שפות (ברירת מחדל: עברית, אנגלית, רוסית)
 const LANGUAGES =
@@ -47,21 +49,21 @@ const OPENAI_VOICE = process.env.OPENAI_VOICE || 'alloy';
 
 const TURN_THRESHOLD = parseFloat(
   process.env.MB_VAD_THRESHOLD ||
-  process.env.TURN_THRESHOLD ||
-  '0.5'
+    process.env.TURN_THRESHOLD ||
+    '0.5'
 );
 
 const TURN_SILENCE_MS = parseInt(
   process.env.MB_VAD_SILENCE_MS ||
-  process.env.TURN_SILENCE_MS ||
-  '600',
+    process.env.TURN_SILENCE_MS ||
+    '600',
   10
 );
 
 const TURN_PREFIX_MS = parseInt(
   process.env.MB_VAD_PREFIX_MS ||
-  process.env.TURN_PREFIX_MS ||
-  '300',
+    process.env.TURN_PREFIX_MS ||
+    '300',
   10
 );
 
@@ -102,6 +104,16 @@ const HANGUP_GRACE_MS = parseInt(
   process.env.MB_HANGUP_GRACE_MS || '2000',
   10
 );
+
+// זמנים לשקט לפני אזהרה / ניתוק אוטומטי
+const IDLE_WARNING_MS = parseInt(
+  process.env.MB_IDLE_WARNING_MS || '20000',
+  10
+); // אחרי 20 שניות שקט – "אתם עדיין על הקו?"
+const IDLE_HANGUP_MS = parseInt(
+  process.env.MB_IDLE_HANGUP_MS || '35000',
+  10
+); // אחרי 35 שניות שקט – סיום שיחה וניתוק
 
 // =============== בדיקת מפתח ===============
 if (!OPENAI_API_KEY) {
@@ -147,8 +159,49 @@ wss.on('connection', (twilioWs) => {
   let openaiWs = null;
   let openaiReady = false;
 
-  // נשמור לוג טקסטואלי של השיחה
+  // לוג טקסטואלי של השיחה
   const conversationLog = [];
+
+  // ניטור שקט
+  let lastUserMediaTs = Date.now();
+  let idleWarningSent = false;
+  let idleInterval = null;
+  let callEnded = false;
+
+  // פונקציה מרכזית לסיום שיחה (גם ל-stop וגם לניתוק אוטומטי)
+  function endCall(reason = 'unknown') {
+    if (callEnded) return;
+    callEnded = true;
+
+    console.log(`⏹️ Ending call, reason: ${reason}`);
+
+    // לעצור בדיקות שקט
+    if (idleInterval) {
+      clearInterval(idleInterval);
+      idleInterval = null;
+    }
+
+    // אם יש Webhook ואיסוף לידים פעיל – נשלח אליו את לוג השיחה
+    if (LEAD_WEBHOOK_URL && ENABLE_LEAD_CAPTURE) {
+      const payload = {
+        streamSid,
+        businessName: BUSINESS_NAME,
+        botName: BOT_NAME,
+        timestamp: new Date().toISOString(),
+        closingMessage: CLOSING_SCRIPT,
+        reason,
+        conversationLog,
+      };
+      postToWebhook(LEAD_WEBHOOK_URL, payload);
+    }
+
+    if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+      openaiWs.close();
+    }
+    if (twilioWs && twilioWs.readyState === WebSocket.OPEN) {
+      twilioWs.close();
+    }
+  }
 
   // ---------- חיבור ל-OpenAI Realtime ----------
   function connectToOpenAI() {
@@ -197,6 +250,13 @@ wss.on('connection', (twilioWs) => {
 - מותר להסביר באופן כללי על עולם הבוטים הקוליים והאוטומציה לעסקים.
 - אסור לתת מידע מפורט או להמליץ על חברות / שירותים מתחרים ספציפיים.
 - אם שואלים על חברה מתחרה, אמרו בעדינות שאתם לא נותנים מידע שיווקי על ספקים אחרים ותמקדו את השיחה במה שמיסטר בוט מציעה.
+
+זמן שקט:
+- אם יש שקט ארוך ואתם מקבלים בקשה מהמערכת לבדוק אם הלקוח עדיין על הקו,
+  שאלו בקצרה: "אני עדיין כאן, אתם איתי על הקו? אם אתם צריכים עוד משהו תגידו לי בבקשה."
+- אם אחרי ההודעה הזו עדיין יש שקט והמערכת מבקשת מכם לסיים,
+  סיימו את השיחה במשפט סיום נעים וקצר בעברית, בסגנון:
+  "${CLOSING_SCRIPT}"
 
 ידע עסקי:
 ${BUSINESS_PROMPT || '(אין כרגע מידע עסקי נוסף)'}
@@ -266,6 +326,54 @@ ${ENABLE_LEAD_CAPTURE ? `
 
       openaiWs.send(JSON.stringify(greeting));
       console.log('📢 Greeting response.create sent');
+
+      // הפעלת טיימר שקט
+      lastUserMediaTs = Date.now();
+      idleWarningSent = false;
+
+      idleInterval = setInterval(() => {
+        if (!openaiReady || callEnded) return;
+        const now = Date.now();
+        const silenceMs = now - lastUserMediaTs;
+
+        // אזהרה ראשונה – "אתם עדיין על הקו?"
+        if (!idleWarningSent && silenceMs >= IDLE_WARNING_MS) {
+          idleWarningSent = true;
+          console.log('⏰ Idle warning – sending "are you still there" message');
+
+          const stillThere = {
+            type: 'response.create',
+            response: {
+              instructions: `
+שאלי בנימוס אם הלקוח עדיין על הקו, בסגנון:
+"אני עדיין כאן, אתם איתי על הקו? אם אתם צריכים עוד משהו תגידו לי בבקשה. אם לא, אסיים את השיחה עוד רגע."
+              `.trim(),
+            },
+          };
+          openaiWs.send(JSON.stringify(stillThere));
+        }
+
+        // ניתוק אוטומטי אחרי אזהרה ושקט מתמשך
+        if (idleWarningSent && silenceMs >= IDLE_HANGUP_MS) {
+          console.log('⏰ Idle timeout reached – sending goodbye and ending call');
+
+          const goodbye = {
+            type: 'response.create',
+            response: {
+              instructions: `
+סיימי את השיחה במשפט סיום נעים וקצר בעברית בסגנון:
+"${CLOSING_SCRIPT}"
+              `.trim(),
+            },
+          };
+          openaiWs.send(JSON.stringify(goodbye));
+
+          // נותנים לזמן הדיבור לצאת החוצה ואז מסיימים את השיחה
+          setTimeout(() => {
+            endCall('idle-timeout');
+          }, HANGUP_GRACE_MS);
+        }
+      }, 2000);
     });
 
     openaiWs.on('message', (data) => {
@@ -360,6 +468,7 @@ ${ENABLE_LEAD_CAPTURE ? `
     if (event === 'start') {
       streamSid = data.start.streamSid;
       console.log('▶️ Stream started, streamSid:', streamSid);
+      lastUserMediaTs = Date.now();
     }
 
     if (event === 'media') {
@@ -367,9 +476,12 @@ ${ENABLE_LEAD_CAPTURE ? `
       const payload = data.media && data.media.payload;
       if (!payload) return;
 
+      // עדכון זמן פעילות אחרון – יש דיבור
+      lastUserMediaTs = Date.now();
+
       if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
         const openaiAudioMsg = {
-          // 🔧 כאן היה הבאג – חייב להיות input_audio_buffer.append (עם קו תחתון)
+          // חשוב: הפורמט התקין
           type: 'input_audio_buffer.append',
           audio: payload,
         };
@@ -378,40 +490,19 @@ ${ENABLE_LEAD_CAPTURE ? `
     }
 
     if (event === 'stop') {
-      console.log('⏹️ Stream stopped');
-
-      // אם יש Webhook ואיסוף לידים פעיל – נשלח אליו את לוג השיחה
-      if (LEAD_WEBHOOK_URL && ENABLE_LEAD_CAPTURE) {
-        const payload = {
-          streamSid,
-          businessName: BUSINESS_NAME,
-          botName: BOT_NAME,
-          timestamp: new Date().toISOString(),
-          closingMessage: CLOSING_SCRIPT,
-          conversationLog,
-        };
-        postToWebhook(LEAD_WEBHOOK_URL, payload);
-      }
-
-      if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-        openaiWs.close();
-      }
-      twilioWs.close();
+      console.log('⏹️ Stream stopped (Twilio stop event)');
+      endCall('twilio-stop');
     }
   });
 
   twilioWs.on('close', () => {
     console.log('☎️ Twilio WebSocket closed');
-    if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-      openaiWs.close();
-    }
+    endCall('twilio-ws-close');
   });
 
   twilioWs.on('error', (err) => {
     console.error('❌ Twilio WebSocket error:', err);
-    if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-      openaiWs.close();
-    }
+    endCall('twilio-ws-error');
   });
 });
 
