@@ -5,13 +5,56 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 
-// ====== ENV ======
+// ========= ENV =========
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
+// שם הבוט / העסק / טקסט פתיח וסגירה
+const BOT_NAME = process.env.BOT_NAME || 'נטע';
+const BUSINESS_NAME = process.env.BUSINESS_NAME || 'MisterBot';
+const OPENING_SUFFIX =
+  process.env.OPENING_SUFFIX ||
+  'שירות האוטומציה לעסקים. אני כאן כדי לעזור לכם בכל שאלה על בוטים קוליים ומערכת מיסטר בוט.';
+const ENDING_MESSAGE =
+  process.env.ENDING_MESSAGE ||
+  'תודה שפניתם למיסטר בוט, שיהיה לכם המשך יום נעים. להתראות.';
+
+// פרומפט כללי (טון, שפות, איסור על מתחרים וכו׳)
+const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT;
+
+// פרומפט ידע עסקי – מידע על העסק הספציפי
+const BUSINESS_KB = process.env.BUSINESS_KB || '';
+
+// שליטה ב-Voice וב-VAD (מהירות תגובה/רגישות)
+const OPENAI_VOICE = process.env.OPENAI_VOICE || 'alloy';
+const TURN_THRESHOLD = parseFloat(process.env.TURN_THRESHOLD || '0.5');
+const TURN_SILENCE_MS = parseInt(process.env.TURN_SILENCE_MS || '600', 10);
+const TURN_PREFIX_MS = parseInt(process.env.TURN_PREFIX_MS || '300', 10);
+const MAX_OUTPUT_TOKENS = process.env.MAX_OUTPUT_TOKENS || 'inf';
+
+// איסוף פרטים / לידים
+const ENABLE_LEAD_CAPTURE =
+  (process.env.ENABLE_LEAD_CAPTURE || 'false').toLowerCase() === 'true';
+
+// שדות לליד מלקוח חדש / לקוח קיים – טקסט חופשי שאתה מגדיר
+const NEW_LEAD_PROMPT =
+  process.env.NEW_LEAD_PROMPT ||
+  'אם מדובר בלקוח חדש, בקשי שם מלא, מספר טלפון וסיבת הפנייה בצורה נינוחה וקצרה.';
+const EXISTING_LEAD_PROMPT =
+  process.env.EXISTING_LEAD_PROMPT ||
+  'אם מדובר בלקוח קיים, בקשי שם מלא, מספר טלפון, ואם יש – מספר לקוח או מזהה, וסיבת הפנייה.';
+
+// לאן נשלח את הנתונים בסיום השיחה
+const LEAD_WEBHOOK_URL =
+  process.env.LEAD_WEBHOOK_URL || process.env.MAKE_WEBHOOK_URL || '';
+
+// =============== בדיקת מפתח ===============
 if (!OPENAI_API_KEY) {
-  console.error('❌ OPENAI_API_KEY is missing! Make sure it is set in Render env.');
+  console.error(
+    '❌ OPENAI_API_KEY is missing! Make sure it is set in Render env.'
+  );
 }
 
+// ========= EXPRESS =========
 const app = express();
 app.get('/', (req, res) => {
   res.send('MisterBot realtime server is running.');
@@ -19,17 +62,37 @@ app.get('/', (req, res) => {
 
 const server = http.createServer(app);
 
-// ====== WebSocket לטוויליו ======
+// ========= WebSocket של טוויליו =========
 const wss = new WebSocket.Server({ server, path: '/twilio-media-stream' });
 
 console.log('✅ MisterBot Realtime bridge starting up...');
 
+// פונקציה קטנה לשליחת POST ל-Webhook (ללא תלות בספריות חיצוניות)
+async function postToWebhook(url, body) {
+  if (!url) return;
+  try {
+    // ב-Node 18+ יש fetch גלובלי
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    console.log('📤 Webhook sent to:', url);
+  } catch (err) {
+    console.error('❌ Failed to send webhook:', err.message || err);
+  }
+}
+
+// ========= חיבורי WS =========
 wss.on('connection', (twilioWs) => {
   console.log('📞 Twilio media stream connected');
 
   let streamSid = null;
   let openaiWs = null;
   let openaiReady = false;
+
+  // נשמור לוג טקסטואלי של השיחה
+  const conversationLog = [];
 
   // ---------- חיבור ל-OpenAI Realtime ----------
   function connectToOpenAI() {
@@ -49,20 +112,34 @@ wss.on('connection', (twilioWs) => {
       console.log('✅ OpenAI Realtime connected');
       openaiReady = true;
 
-      // הגדרת session: עברית, g711_ulaw, VAD בצד השרת
+      // פרומפט ברירת מחדל אם לא הוגדר SYSTEM_PROMPT ב-ENV
+      const defaultSystemPrompt = `
+אתם עוזר קולי בשם "${BOT_NAME}" עבור שירות "${BUSINESS_NAME}".
+דברו תמיד בעברית כברירת מחדל, בלשון רבים (אתכם), בטון נעים, טבעי, חמים וקצר.
+אם הלקוח מדבר באנגלית או ברוסית, אפשר לעבור לשפה שלו, אבל אל תעברו שפה בלי סיבה.
+ענו במהירות, במשפטים קצרים יחסית, בלי נאומים ארוכים.
+מותר לענות על כל שאלה כללית, אבל:
+- אל תמליצו על חברות או שירותים מתחרים למיסטר בוט.
+- אם שואלים במפורש על מתחרים, תגידו בעדינות שאתם לא נותנים מידע שיווקי על מתחרים.
+שלבו בשיחה את הידע העסקי הבא (אם רלוונטי): 
+${BUSINESS_KB || '(אין כרגע מידע עסקי נוסף)'}
+
+${ENABLE_LEAD_CAPTURE ? `
+במהלך השיחה נסו להבין האם מדובר בלקוח חדש או לקוח קיים.
+- אם זה לקוח חדש: ${NEW_LEAD_PROMPT}
+- אם זה לקוח קיים: ${EXISTING_LEAD_PROMPT}
+בסיום השיחה, אם נאספו פרטים, תסכמו אותם במשפט קצר וברור (שם, טלפון, סיבת פנייה).
+` : ''}
+`.trim();
+
       const sessionUpdate = {
         type: 'session.update',
         session: {
-          instructions: `
-אתם עוזר קולי בשם "נטע" עבור שירות האוטומציה לעסקים "MisterBot".
-דברו תמיד בעברית, בלשון רבים (אתכם), בטון נעים, טבעי וקצר.
-אפשר גם לענות באנגלית או רוסית אם הלקוח מדבר בשפות הללו.
-ענו על כל שאלה כללית, אבל אל תתנו מידע מפורט על חברות או שירותים מתחרים בתחום של בוטים קוליים ואוטומציה לעסקים.
-          `.trim(),
-          voice: 'alloy',
+          instructions: (SYSTEM_PROMPT || defaultSystemPrompt).trim(),
+          voice: OPENAI_VOICE,
           modalities: ['audio', 'text'],
 
-          // כאן התיקון: שימוש ב-g711_ulaw (קו תחתון)
+          // חשוב: הפורמט שתואם לטוויליו
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
 
@@ -71,24 +148,26 @@ wss.on('connection', (twilioWs) => {
           },
           turn_detection: {
             type: 'server_vad',
-            threshold: 0.5,
-            silence_duration_ms: 600,
-            prefix_padding_ms: 300,
+            threshold: TURN_THRESHOLD,
+            silence_duration_ms: TURN_SILENCE_MS,
+            prefix_padding_ms: TURN_PREFIX_MS,
           },
-          max_response_output_tokens: 'inf',
+          max_response_output_tokens: MAX_OUTPUT_TOKENS,
         },
       };
 
       openaiWs.send(JSON.stringify(sessionUpdate));
       console.log('🧠 OpenAI session.update sent');
 
-      // ברכת פתיחה אוטומטית
+      // ברכת פתיחה – ניתנת לשליטה דרך ENV (שם + OPENING_SUFFIX)
       const greeting = {
         type: 'response.create',
         response: {
           instructions: `
-ברכי את הלקוח בעברית כ"נטע ממיסטר בוט".
-הציגי את עצמך בקצרה ושאלי איך אפשר לעזור, במשפט אחד קצר.
+את ${BOT_NAME} מ"${BUSINESS_NAME}".
+פתחי את השיחה בעברית, במשפט אחד קצר:
+היי או שלום, הציגי את עצמך כ"${BOT_NAME}" ממיסטר בוט, הוסיפי בקצרה: "${OPENING_SUFFIX}",
+ושאלי בנימוס איך אפשר לעזור. 
           `.trim(),
         },
       };
@@ -105,7 +184,7 @@ wss.on('connection', (twilioWs) => {
         return;
       }
 
-      // אודיו מהבוט ← אל טוויליו
+      // אודיו מהבוט → טוויליו
       if (
         msg.type === 'response.audio.delta' &&
         msg.delta &&
@@ -122,10 +201,26 @@ wss.on('connection', (twilioWs) => {
         twilioWs.send(JSON.stringify(twilioMediaMsg));
       }
 
+      // תמלול מלא של מה שהלקוח אמר
       if (msg.type === 'conversation.item.input_audio_transcription.completed') {
         const transcript = msg.transcript;
         if (transcript) {
           console.log('👂 User said:', transcript);
+          conversationLog.push({ from: 'user', text: transcript });
+        }
+      }
+
+      // טקסט של תשובת הבוט – אם תרצה לוג טקסטואלי
+      if (msg.type === 'response.output_text.done' && msg.output && msg.output[0]?.content) {
+        const parts = msg.output[0].content;
+        const textParts = parts
+          .filter((p) => p.type === 'output_text' || p.type === 'text')
+          .map((p) => p.text || p.output_text)
+          .filter(Boolean);
+        if (textParts.length) {
+          const botText = textParts.join(' ');
+          console.log('🤖 Bot said:', botText);
+          conversationLog.push({ from: 'bot', text: botText });
         }
       }
 
@@ -185,6 +280,33 @@ wss.on('connection', (twilioWs) => {
 
     if (event === 'stop') {
       console.log('⏹️ Stream stopped');
+
+      // שליחת הודעת סגירה (ברמת הטון – הבוט כבר יודע מה להגיד מהפרומפט)
+      if (openaiWs && openaiReady && openaiWs.readyState === WebSocket.OPEN) {
+        const closing = {
+          type: 'response.create',
+          response: {
+            instructions: `
+סיימי את השיחה במשפט סיום נעים וקצר בעברית, בסגנון:
+"${ENDING_MESSAGE}"
+            `.trim(),
+          },
+        };
+        openaiWs.send(JSON.stringify(closing));
+      }
+
+      // אם מוגדר webhook – נשלח אליו את לוג השיחה
+      if (LEAD_WEBHOOK_URL && ENABLE_LEAD_CAPTURE) {
+        const payload = {
+          streamSid,
+          businessName: BUSINESS_NAME,
+          botName: BOT_NAME,
+          timestamp: new Date().toISOString(),
+          conversationLog,
+        };
+        postToWebhook(LEAD_WEBHOOK_URL, payload);
+      }
+
       if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
         openaiWs.close();
       }
@@ -207,7 +329,7 @@ wss.on('connection', (twilioWs) => {
   });
 });
 
-// ====== RUN SERVER ======
+// ========= RUN SERVER =========
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
   console.log(`🚀 MisterBot Realtime server listening on port ${PORT}`);
