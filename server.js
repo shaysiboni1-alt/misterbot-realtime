@@ -3,6 +3,7 @@
 // MisterBot Realtime Voice Bot – "נטע"
 // Twilio Media Streams <-> OpenAI Realtime API (gpt-4o-realtime-preview-2024-12-17)
 //
+//
 // חוקים עיקריים לפי ה-MASTER PROMPT:
 // - שיחה בעברית כברירת מחדל, לשון רבים, טון חם וקצר.
 // - שליטה מלאה דרך ENV (פתיח, סגיר, פרומפט כללי, KB עסקי, טיימרים, לידים, VAD).
@@ -12,6 +13,7 @@
 // דרישות:
 //   npm install express ws dotenv
 //   (מומלץ Node 18+ כדי ש-fetch יהיה זמין גלובלית)
+//
 //
 // להרצה (למשל):
 //   PORT=3000 node server.js
@@ -79,6 +81,7 @@ const MAX_OUTPUT_TOKENS = process.env.MAX_OUTPUT_TOKENS || 'inf';
 const MB_VAD_THRESHOLD = envNumber('MB_VAD_THRESHOLD', 0.5);
 const MB_VAD_SILENCE_MS = envNumber('MB_VAD_SILENCE_MS', 600);
 const MB_VAD_PREFIX_MS = envNumber('MB_VAD_PREFIX_MS', 300);
+const MB_VAD_SUFFIX_MS = envNumber('MB_VAD_SUFFIX_MS', 0); // ✅ חדש
 
 // Idle / Duration
 const MB_IDLE_WARNING_MS = envNumber('MB_IDLE_WARNING_MS', 40000); // 40 שניות
@@ -163,6 +166,10 @@ ${langsTxt}
 - לא להתנצל כל הזמן, לא לחפור, לא לחזור על עצמך.
 - לנהל שיחה זורמת, לשאול שאלות המשך קצרות כשצריך.
 
+פתיחת שיחה:
+- בפתיחת השיחה, אחרי הברכה והצגה עצמית, לשאול בקצרה "איך אפשר לעזור לכם היום?" או ניסוח דומה.
+- אחרי השאלה הזאת – לעצור ולחכות שהלקוח ידבר. לא לתת הסברים נוספים, לא להמשיך לדבר ולא לענות לעצמכם לפני שהלקוח הגיב בפעם הראשונה.
+
 טלפונים:
 - כאשר מבקשים מספר טלפון – לבקש ספרה-ספרה בקול.
 - להתייחס למספר כרצף ספרות בלבד.
@@ -175,13 +182,19 @@ ${langsTxt}
 - אם שואלים על מתחרה ספציפי – להסביר בעדינות שאינכם נותנים מידע שיווקי מפורט על מתחרים, ולהחזיר את הפוקוס לשירותי MisterBot.
 
 איסוף פרטים (לידים):
-- אם נראה שהשיחה מתאימה לאיסוף פרטי לקוח – לשאול בעדינות:
-  - שם מלא.
-  - שם העסק.
-  - תחום פעילות.
-  - מספר טלפון.
-  - סיבת הפנייה.
-- לחזור בסוף בקצרה על הפרטים כדי לוודא שהכול נכון.
+- איסוף פרטים נעשה רק אם ברור שיש התעניינות בשירות / פנייה עסקית.
+- לפני איסוף פרטים: להסביר בעדינות למה לוקחים פרטים ("כדי שנוכל לחזור אליכם / להתקדם מול נציג").
+- אסור לבקש כמה פרטים באותה שאלה. תמיד:
+  - שואלים שאלה אחת בלבד.
+  - מחכים לתשובה.
+  - ורק אחר כך עוברים לשאלה הבאה.
+- סדר מומלץ:
+  1. קודם: "איך אפשר לפנות אליכם? אפשר שם פרטי או מלא."
+  2. אחרי שהתשובה מגיעה: לשאול אם יש שם עסק. אם אין – לדלג הלאה.
+  3. אחר כך: "מה מספר הטלפון שנוח לחזור אליכם אליו?" (לבקש ספרה-ספרה ולהקריא בחזרה).
+  4. לבסוף: לבקש במשפט אחד קצר מה סיבת הפנייה.
+- בסיום איסוף הפרטים: לסכם בקצרה ללקוח את מה שנרשם ולוודא שזה נכון.
+- אם הלקוח לא מוכן להשאיר פרטים – לכבד זאת, להודות לו ולהמשיך שיחה כללית או לסיים בעדינות.
 
 סיום שיחה:
 - אם הלקוח אומר "זהו", "זה הכול", "סיימנו", "מספיק לעכשיו", "תודה", "ביי", "להתראות" וכדומה – להבין שזאת סיום שיחה.
@@ -388,6 +401,23 @@ wss.on('connection', (connection, req) => {
     try {
       const parsedLead = await extractLeadFromConversation(conversationLog);
 
+      if (!parsedLead) {
+        logInfo(tag, 'No parsed lead – skipping webhook.');
+        return;
+      }
+
+      const hasContactDetails =
+        !!(parsedLead.phone_number || parsedLead.full_name || parsedLead.business_name);
+
+      if (!parsedLead.is_lead || !hasContactDetails) {
+        logInfo(
+          tag,
+          'Parsed lead is not a valid lead or missing contact details – skipping webhook.',
+          parsedLead
+        );
+        return;
+      }
+
       const payload = {
         streamSid,
         callSid,
@@ -474,7 +504,10 @@ wss.on('connection', (connection, req) => {
         hangupGraceTimeout = setTimeout(() => {
           if (pendingHangup) {
             const { reason: r, closingMessage: cm } = pendingHangup;
-            logInfo(tag, `Hangup grace timeout reached (${MB_HANGUP_GRACE_MS} ms), forcing endCall.`);
+            logInfo(
+              tag,
+              `Hangup grace timeout reached (${MB_HANGUP_GRACE_MS} ms), forcing endCall.`
+            );
             pendingHangup = null;
             endCall(r, cm);
           }
@@ -491,7 +524,12 @@ wss.on('connection', (connection, req) => {
   // -----------------------------
   function checkUserGoodbye(transcript) {
     if (!transcript) return;
-    const t = transcript.toLowerCase();
+    const t = transcript.toLowerCase().trim();
+
+    // מתעלמים מטקסטים ארוכים – כמעט בטוח שזה דיבור של הבוט ולא "ביי" קצר של הלקוח
+    if (t.length > 40) {
+      return;
+    }
 
     const goodbyePatterns = [
       'זהו',
@@ -567,7 +605,8 @@ wss.on('connection', (connection, req) => {
           type: 'server_vad',
           threshold: MB_VAD_THRESHOLD,
           silence_duration_ms: MB_VAD_SILENCE_MS,
-          prefix_padding_ms: MB_VAD_PREFIX_MS
+          prefix_padding_ms: MB_VAD_PREFIX_MS,
+          suffix_padding_ms: MB_VAD_SUFFIX_MS // ✅ חדש
         },
         max_response_output_tokens: MAX_OUTPUT_TOKENS,
         instructions
