@@ -3,7 +3,6 @@
 // MisterBot Realtime Voice Bot – "נטע"
 // Twilio Media Streams <-> OpenAI Realtime API (gpt-4o-realtime-preview-2024-12-17)
 //
-//
 // חוקים עיקריים לפי ה-MASTER PROMPT:
 // - שיחה בעברית כברירת מחדל, לשון רבים, טון חם וקצר.
 // - שליטה מלאה דרך ENV (פתיח, סגיר, פרומפט כללי, KB עסקי, טיימרים, לידים, VAD).
@@ -13,7 +12,6 @@
 // דרישות:
 //   npm install express ws dotenv
 //   (מומלץ Node 18+ כדי ש-fetch יהיה זמין גלובלית)
-//
 //
 // להרצה (למשל):
 //   PORT=3000 node server.js
@@ -81,7 +79,7 @@ const MAX_OUTPUT_TOKENS = process.env.MAX_OUTPUT_TOKENS || 'inf';
 const MB_VAD_THRESHOLD = envNumber('MB_VAD_THRESHOLD', 0.5);
 const MB_VAD_SILENCE_MS = envNumber('MB_VAD_SILENCE_MS', 600);
 const MB_VAD_PREFIX_MS = envNumber('MB_VAD_PREFIX_MS', 300);
-const MB_VAD_SUFFIX_MS = envNumber('MB_VAD_SUFFIX_MS', 0); // ✅ חדש
+const MB_VAD_SUFFIX_MS = envNumber('MB_VAD_SUFFIX_MS', 0); // קטע שקט נוסף אחרי הזיהוי
 
 // Idle / Duration
 const MB_IDLE_WARNING_MS = envNumber('MB_IDLE_WARNING_MS', 40000); // 40 שניות
@@ -592,6 +590,9 @@ wss.on('connection', (connection, req) => {
     openAiReady = true;
     logInfo(tag, 'Connected to OpenAI Realtime API.');
 
+    // זמן שקט אפקטיבי = בסיס + סיומת
+    const effectiveSilenceMs = MB_VAD_SILENCE_MS + MB_VAD_SUFFIX_MS;
+
     const sessionUpdate = {
       type: 'session.update',
       session: {
@@ -604,9 +605,8 @@ wss.on('connection', (connection, req) => {
         turn_detection: {
           type: 'server_vad',
           threshold: MB_VAD_THRESHOLD,
-          silence_duration_ms: MB_VAD_SILENCE_MS,
-          prefix_padding_ms: MB_VAD_PREFIX_MS,
-          suffix_padding_ms: MB_VAD_SUFFIX_MS // ✅ חדש
+          silence_duration_ms: effectiveSilenceMs,
+          prefix_padding_ms: MB_VAD_PREFIX_MS
         },
         max_response_output_tokens: MAX_OUTPUT_TOKENS,
         instructions
