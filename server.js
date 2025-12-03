@@ -89,6 +89,9 @@ const MB_MAX_CALL_MS = envNumber('MB_MAX_CALL_MS', 5 * 60 * 1000);
 const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000); // 45 שניות לפני הסוף
 const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 3000); // זמן המתנה אחרי פרידה לפני ניתוק בכוח
 
+// האם מותר ללקוח לקטוע את הבוט (barge-in). ברירת מחדל: false = חוק ברזל שאי אפשר לקטוע.
+const MB_ALLOW_BARGE_IN = envBool('MB_ALLOW_BARGE_IN', false);
+
 // לידים / וובהוק
 const MB_ENABLE_LEAD_CAPTURE = envBool('MB_ENABLE_LEAD_CAPTURE', false);
 const MB_WEBHOOK_URL = process.env.MB_WEBHOOK_URL || '';
@@ -388,6 +391,9 @@ wss.on('connection', (connection, req) => {
   let twilioClosed = false;
   let openAiClosed = false;
 
+  // האם הבוט מדבר כרגע (חוק ברזל – אין barge-in)
+  let botSpeaking = false;
+
   // -----------------------------
   // Helper: שליחת וובהוק לידים / לוג
   // -----------------------------
@@ -466,6 +472,9 @@ wss.on('connection', (connection, req) => {
       twilioClosed = true;
       connection.close();
     }
+
+    // בטוח שהבוט לא "מדבר" יותר
+    botSpeaking = false;
   }
 
   // -----------------------------
@@ -497,7 +506,7 @@ wss.on('connection', (connection, req) => {
       openAiWs.send(JSON.stringify({ type: 'response.create' }));
       logInfo(tag, `Scheduled hangup with closing message: ${text}`);
 
-      // ניתוק בטוח לאחר MB_HANGUP_GRACE_MS גם אם לא קיבלנו response.done
+      // ניתוק בטוח לאחר MB_HANGUP_GRACE_MS גם אם לא קיבלנו response.output_audio.done / response.done
       if (!hangupGraceTimeout && MB_HANGUP_GRACE_MS > 0) {
         hangupGraceTimeout = setTimeout(() => {
           if (pendingHangup) {
@@ -658,12 +667,26 @@ wss.on('connection', (connection, req) => {
         if (!event.delta) return;
         if (connection.readyState !== WebSocket.OPEN) return;
 
+        // הבוט מדבר כרגע – חוסמים barge-in
+        botSpeaking = true;
+
         const audioDelta = {
           event: 'media',
           streamSid,
           media: { payload: event.delta }
         };
         connection.send(JSON.stringify(audioDelta));
+        break;
+      }
+
+      // סיום האודיו של התשובה – כאן אנחנו מנתקים מיד אם יש pendingHangup
+      case 'response.output_audio.done': {
+        botSpeaking = false;
+        if (pendingHangup) {
+          const { reason, closingMessage } = pendingHangup;
+          pendingHangup = null;
+          endCall(reason, closingMessage);
+        }
         break;
       }
 
@@ -680,12 +703,7 @@ wss.on('connection', (connection, req) => {
           conversationLog.push({ from: 'bot', text: currentBotText.trim() });
           currentBotText = '';
         }
-
-        if (pendingHangup) {
-          const { reason, closingMessage } = pendingHangup;
-          pendingHangup = null;
-          endCall(reason, closingMessage);
-        }
+        // הלוגיקה של הניתוק הועברה ל-output_audio.done כדי שיקרה מיד בסיום המשפט בקול.
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
@@ -713,6 +731,7 @@ wss.on('connection', (connection, req) => {
 
   openAiWs.on('close', () => {
     openAiClosed = true;
+    botSpeaking = false;
     logInfo(tag, 'OpenAI WS connection closed.');
   });
 
@@ -801,6 +820,12 @@ wss.on('connection', (connection, req) => {
 
       case 'media':
         lastMediaTs = Date.now();
+
+        // חוק ברזל: אם הבוט מדבר ואין barge-in – מתעלמים מהאודיו של הלקוח
+        if (!MB_ALLOW_BARGE_IN && botSpeaking) {
+          return;
+        }
+
         if (openAiReady && openAiWs.readyState === WebSocket.OPEN) {
           const audioAppend = {
             type: 'input_audio_buffer.append',
@@ -833,6 +858,7 @@ wss.on('connection', (connection, req) => {
     if (idleCheckInterval) clearInterval(idleCheckInterval);
     if (maxCallTimeout) clearTimeout(maxCallTimeout);
     if (hangupGraceTimeout) clearTimeout(hangupGraceTimeout);
+    botSpeaking = false;
   });
 
   connection.on('error', (err) => {
