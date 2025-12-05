@@ -436,6 +436,38 @@ wss.on('connection', (connection, req) => {
   // האם הבוט מדבר כרגע (חוק ברזל – אין barge-in)
   let botSpeaking = false;
 
+  // דגל: האם יש response.create פעיל במודל
+  let hasActiveResponse = false;
+
+  // -----------------------------
+  // Helper: שליחת טקסט למודל עם הגנה על response כפול
+  // -----------------------------
+  function sendModelPrompt(text, purpose) {
+    if (openAiWs.readyState !== WebSocket.OPEN) {
+      logDebug(tag, `Cannot send model prompt (${purpose || 'no-tag'}) – WS not open.`);
+      return;
+    }
+    if (hasActiveResponse) {
+      logDebug(
+        tag,
+        `Skipping model prompt (${purpose || 'no-tag'}) – conversation already has active response.`
+      );
+      return;
+    }
+
+    const item = {
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text }]
+      }
+    };
+    openAiWs.send(JSON.stringify(item));
+    openAiWs.send(JSON.stringify({ type: 'response.create' }));
+    hasActiveResponse = true;
+  }
+
   // -----------------------------
   // Helper: האם הלקוח ביקש חזרה למספר המזוהה
   // -----------------------------
@@ -485,7 +517,11 @@ wss.on('connection', (connection, req) => {
         !!parsedLead.phone_number;
 
       if (!isFullLead) {
-        logInfo(tag, 'Parsed lead is not a full lead (or missing phone) – skipping webhook.', parsedLead);
+        logInfo(
+          tag,
+          'Parsed lead is not a full lead (or missing phone) – skipping webhook.',
+          parsedLead
+        );
         return;
       }
 
@@ -543,6 +579,7 @@ wss.on('connection', (connection, req) => {
 
     // בטוח שהבוט לא "מדבר" יותר
     botSpeaking = false;
+    hasActiveResponse = false;
   }
 
   // -----------------------------
@@ -557,21 +594,11 @@ wss.on('connection', (connection, req) => {
 
     if (openAiWs.readyState === WebSocket.OPEN) {
       const text = pendingHangup.closingMessage || MB_CLOSING_SCRIPT;
-      const item = {
-        type: 'conversation.item.create',
-        item: {
-          type: 'message',
-          role: 'user',
-          content: [
-            {
-              type: 'input_text',
-              text: `סיימי את השיחה עם הלקוח במשפט הבא בלבד, בלי להוסיף משפטים נוספים: "${text}"`
-            }
-          ]
-        }
-      };
-      openAiWs.send(JSON.stringify(item));
-      openAiWs.send(JSON.stringify({ type: 'response.create' }));
+      // ננסה לתת לבוט להגיד משפט סיום, אבל רק אם אין response פעיל
+      sendModelPrompt(
+        `סיימי את השיחה עם הלקוח במשפט הבא בלבד, בלי להוסיף משפטים נוספים: "${text}"`,
+        'closing'
+      );
       logInfo(tag, `Scheduled hangup with closing message: ${text}`);
 
       // ניתוק בטוח לאחר MB_HANGUP_GRACE_MS גם אם לא קיבלנו response.output_audio.done / response.completed
@@ -661,23 +688,16 @@ wss.on('connection', (connection, req) => {
     if (idleWarningSent) return;
     idleWarningSent = true;
 
-    if (openAiWs.readyState === WebSocket.OPEN) {
-      const text = 'אני עדיין כאן על הקו, אתם איתי? אם תרצו להמשיך, אפשר פשוט לשאול או לבקש.';
-      const item = {
-        type: 'conversation.item.create',
-        item: {
-          type: 'message',
-          role: 'user',
-          content: [
-            {
-              type: 'input_text',
-              text: `תגיבי ללקוח במשפט קצר בסגנון הבא (אפשר לשנות קצת): "${text}"`
-            }
-          ]
-        }
-      };
-      openAiWs.send(JSON.stringify(item));
-      openAiWs.send(JSON.stringify({ type: 'response.create' }));
+    const text =
+      'אני עדיין כאן על הקו, אתם איתי? אם תרצו להמשיך, אפשר פשוט לשאול או לבקש.';
+    sendModelPrompt(
+      `תגיבי ללקוח במשפט קצר בסגנון הבא (אפשר לשנות קצת): "${text}"`,
+      'idle_warning'
+    );
+    if (!hasActiveResponse) {
+      // אם לא הצלחנו לשלוח (למשל כי כבר יש תשובה), פשוט נרשום בלוג
+      logDebug(tag, 'Idle warning not sent because of active response.');
+    } else {
       logInfo(tag, 'Idle warning sent via model.');
     }
   }
@@ -717,22 +737,10 @@ wss.on('connection', (connection, req) => {
     openAiWs.send(JSON.stringify(sessionUpdate));
 
     const greetingText = MB_OPENING_SCRIPT;
-    const initialItem = {
-      type: 'conversation.item.create',
-      item: {
-        type: 'message',
-        role: 'user',
-        content: [
-          {
-            type: 'input_text',
-            text: `פתחי את השיחה עם הלקוח בעברית במשפטים קצרים בסגנון הבא (אפשר טיפה לשנות, אבל לא יותר מדי): "${greetingText}"`
-          }
-        ]
-      }
-    };
-
-    openAiWs.send(JSON.stringify(initialItem));
-    openAiWs.send(JSON.stringify({ type: 'response.create' }));
+    sendModelPrompt(
+      `פתחי את השיחה עם הלקוח בעברית במשפטים קצרים בסגנון הבא (אפשר טיפה לשנות, אבל לא יותר מדי): "${greetingText}"`,
+      'greeting'
+    );
   });
 
   openAiWs.on('message', (data) => {
@@ -774,6 +782,7 @@ wss.on('connection', (connection, req) => {
       case 'response.output_audio.done':
       case 'response.audio.done': {
         botSpeaking = false;
+        hasActiveResponse = false;
 
         if (pendingHangup) {
           const { reason, closingMessage } = pendingHangup;
@@ -797,7 +806,8 @@ wss.on('connection', (connection, req) => {
           conversationLog.push({ from: 'bot', text: currentBotText.trim() });
           currentBotText = '';
         }
-        // לא מנתקים כאן – הניתוק קורה על output_audio.done כדי לסיים משפט בקול.
+        // גם כאן נאפס את הדגל ליתר ביטחון (במיוחד אם יש תשובות טקסט בלבד)
+        hasActiveResponse = false;
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
@@ -818,6 +828,8 @@ wss.on('connection', (connection, req) => {
 
       case 'error':
         logError(tag, 'OpenAI error event', event);
+        // במקרה של שגיאה – אין עוד תשובה פעילה
+        hasActiveResponse = false;
         break;
 
       default:
@@ -828,11 +840,13 @@ wss.on('connection', (connection, req) => {
   openAiWs.on('close', () => {
     openAiClosed = true;
     botSpeaking = false;
+    hasActiveResponse = false;
     logInfo(tag, 'OpenAI WS connection closed.');
   });
 
   openAiWs.on('error', (err) => {
     logError(tag, 'OpenAI WS error', err);
+    hasActiveResponse = false;
   });
 
   // -----------------------------
@@ -913,24 +927,15 @@ wss.on('connection', (connection, req) => {
           const warnAt = MB_MAX_CALL_MS - MB_MAX_WARN_BEFORE_MS;
           if (warnAt > 0) {
             maxCallTimeout = setTimeout(() => {
-              if (openAiWs.readyState === WebSocket.OPEN) {
-                const warnText =
-                  'אנחנו מתקרבים לסיום הזמן לשיחה. אם תרצו להתקדם ולהשאיר פרטים, זה זמן טוב לעשות זאת עכשיו.';
-                const item = {
-                  type: 'conversation.item.create',
-                  item: {
-                    type: 'message',
-                    role: 'user',
-                    content: [
-                      {
-                        type: 'input_text',
-                        text: `תני ללקוח אזהרה קצרה בסגנון הבא (אפשר לשנות מעט): "${warnText}"`
-                      }
-                    ]
-                  }
-                };
-                openAiWs.send(JSON.stringify(item));
-                openAiWs.send(JSON.stringify({ type: 'response.create' }));
+              const warnText =
+                'אנחנו מתקרבים לסיום הזמן לשיחה. אם תרצו להתקדם ולהשאיר פרטים, זה זמן טוב לעשות זאת עכשיו.';
+              sendModelPrompt(
+                `תני ללקוח אזהרה קצרה בסגנון הבא (אפשר לשנות מעט): "${warnText}"`,
+                'max_duration_warning'
+              );
+              if (!hasActiveResponse) {
+                logDebug(tag, 'Max duration warning not sent because of active response.');
+              } else {
                 logInfo(tag, 'Max duration warning sent.');
               }
             }, warnAt);
@@ -980,6 +985,7 @@ wss.on('connection', (connection, req) => {
     if (maxCallTimeout) clearTimeout(maxCallTimeout);
     if (hangupGraceTimeout) clearTimeout(hangupGraceTimeout);
     botSpeaking = false;
+    hasActiveResponse = false;
   });
 
   connection.on('error', (err) => {
