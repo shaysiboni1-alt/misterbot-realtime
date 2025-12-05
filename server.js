@@ -506,7 +506,7 @@ wss.on('connection', (connection, req) => {
       openAiWs.send(JSON.stringify({ type: 'response.create' }));
       logInfo(tag, `Scheduled hangup with closing message: ${text}`);
 
-      // ניתוק בטוח לאחר MB_HANGUP_GRACE_MS גם אם לא קיבלנו response.done
+      // ניתוק בטוח לאחר MB_HANGUP_GRACE_MS גם אם לא קיבלנו response.output_audio.done / response.completed
       if (!hangupGraceTimeout && MB_HANGUP_GRACE_MS > 0) {
         hangupGraceTimeout = setTimeout(() => {
           if (pendingHangup) {
@@ -679,6 +679,19 @@ wss.on('connection', (connection, req) => {
         break;
       }
 
+      // כשהאודיו של התשובה הסתיים – נטע סיימה לדבר
+      case 'response.output_audio.done':
+      case 'response.audio.done': {
+        botSpeaking = false;
+
+        if (pendingHangup) {
+          const { reason, closingMessage } = pendingHangup;
+          pendingHangup = null;
+          endCall(reason, closingMessage);
+        }
+        break;
+      }
+
       case 'response.output_text.delta':
         if (typeof event.delta === 'string') {
           currentBotText += event.delta;
@@ -693,14 +706,7 @@ wss.on('connection', (connection, req) => {
           conversationLog.push({ from: 'bot', text: currentBotText.trim() });
           currentBotText = '';
         }
-        // סיום תשובה = הבוט כבר לא מדבר, מותר לקלוט לקוח
-        botSpeaking = false;
-
-        if (pendingHangup) {
-          const { reason, closingMessage } = pendingHangup;
-          pendingHangup = null;
-          endCall(reason, closingMessage);
-        }
+        // לא מנתקים כאן – הניתוק קורה על output_audio.done כדי לסיים משפט בקול.
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
