@@ -62,7 +62,7 @@ const MB_OPENING_SCRIPT =
 
 const MB_CLOSING_SCRIPT =
   process.env.MB_CLOSING_SCRIPT ||
-  'תודה שדיברתם עם מיסטר בוט. המשך יום נעים, ולהתראות.';
+  'תודה שדיברתם עם מיסטר בוט, יום נעים ולהתראות.';
 
 const MB_GENERAL_PROMPT = process.env.MB_GENERAL_PROMPT || '';
 const MB_BUSINESS_PROMPT = process.env.MB_BUSINESS_PROMPT || '';
@@ -184,6 +184,8 @@ ${langsTxt}
   - אסור לאחד ספרות ("שלושים ושתיים") – יש לומר כל ספרה בנפרד: "שלוש, שתיים".
   - אם אינכם בטוחים במספר – לבקש בנימוס שיחזרו עליו שוב במקום לנחש מספר אחר.
   - אם המספר כולל 10 ספרות – בעת החזרה על המספר חייבים להקריא 10 ספרות בדיוק. אם שמעתם פחות – בקשו מהלקוח לחזור שוב כדי לא לטעות.
+  - לפני שאתם מקריאים מספר, ודאו שיש לכם בדיוק 10 ספרות. אם חסרה ספרה או יש ספק – בקשו שוב מהלקוח לומר אותו, ואל תקצרו או תסכמו.
+  - למשל: אם נאמר "0 5 0 3 2 2 2 2 3 7" אתם חייבים להגיד בקול: "אפס, חמש, אפס, שלוש, שתיים, שתיים, שתיים, שתיים, שלוש, שבע" – בלי לדלג על אף "שתיים" ובלי לחבר אותן.
 - אם הלקוח אומר "תחזרו למספר שממנו אני מתקשר" או "למספר המזוהה":
   - אל תקריאו מספר בקול.
   - תגידו משפט בסגנון: "מעולה, ירשם שנחזור אליכם למספר שממנו אתם מתקשרים כעת."
@@ -448,24 +450,24 @@ wss.on('connection', (connection, req) => {
   // Helper: שליחת וובהוק לידים / לוג
   // -----------------------------
   async function sendLeadWebhook(reason, closingMessage) {
+    // חוק ברזל: שולחים וובהוק רק אם:
+    // 1. MB_ENABLE_LEAD_CAPTURE=true
+    // 2. יש MB_WEBHOOK_URL
+    // 3. יש ליד אמיתי is_lead=true
+    // 4. lead_type הוא new/existing
+    // 5. יש מספר טלפון (או מזוהה שהלקוח ביקש לחזור אליו)
     if (!MB_ENABLE_LEAD_CAPTURE || !MB_WEBHOOK_URL) {
-      logDebug(tag, 'Lead webhook disabled or URL missing – skipping.');
+      logDebug(tag, 'Lead capture disabled or no MB_WEBHOOK_URL – skipping webhook.');
       return;
     }
+
     try {
       let parsedLead = await extractLeadFromConversation(conversationLog);
 
-      // תמיד מוודאים שיש אובייקט לוגי, גם אם המודל לא החזיר כלום
+      // אם אין אובייקט – אין ליד, לא שולחים
       if (!parsedLead || typeof parsedLead !== 'object') {
-        parsedLead = {
-          is_lead: false,
-          lead_type: 'unknown',
-          full_name: null,
-          business_name: null,
-          phone_number: null,
-          reason: null,
-          notes: ''
-        };
+        logInfo(tag, 'No parsed lead object – skipping webhook.');
+        return;
       }
 
       // אם הלקוח ביקש חזרה למספר המזוהה ואין מספר בליד – נשתמש ב-callerNumber
@@ -477,10 +479,20 @@ wss.on('connection', (connection, req) => {
           'הלקוח ביקש חזרה למספר המזוהה ממנו התקשר.';
       }
 
+      const isFullLead =
+        parsedLead.is_lead === true &&
+        (parsedLead.lead_type === 'new' || parsedLead.lead_type === 'existing') &&
+        !!parsedLead.phone_number;
+
+      if (!isFullLead) {
+        logInfo(tag, 'Parsed lead is not a full lead (or missing phone) – skipping webhook.', parsedLead);
+        return;
+      }
+
       const payload = {
         streamSid,
         callSid,
-        callerNumber,         // מספר מזוהה כפי שהגיע מטוויליו
+        callerNumber, // מספר מזוהה כפי שהגיע מטוויליו
         botName: BOT_NAME,
         businessName: BUSINESS_NAME,
         startedAt: new Date(callStartTs).toISOString(),
@@ -891,7 +903,7 @@ wss.on('connection', (connection, req) => {
           if (MB_MAX_CALL_MS > 0 && callMs >= MB_MAX_CALL_MS) {
             logInfo(tag, `Max call duration reached (${callMs} ms), scheduling hangup.`);
             const finalText =
-              'הזמן שהוקצה לשיחה שלנו הסתיים, תודה שדיברתם איתי. נמשיך משלב זה מול נציג מטעם מיסטר בוט. יום נעים ולהתראות.';
+              'הזמן שהוקצה לשיחה הסתיים, תודה שדיברתם איתי ויום נעים.';
             scheduleEndCall('max_duration', finalText);
           }
         }, 1000);
