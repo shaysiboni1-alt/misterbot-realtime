@@ -107,6 +107,32 @@ const MB_LEAD_PARSING_MODEL = process.env.MB_LEAD_PARSING_MODEL || 'gpt-4.1-mini
 const MB_DEBUG = envBool('MB_DEBUG', false);
 
 // -----------------------------
+// Dynamic KB from Google Drive
+// -----------------------------
+const MB_DYNAMIC_KB_URL = process.env.MB_DYNAMIC_KB_URL || '';
+let dynamicBusinessPrompt = '';
+
+// לוגרים יוגדרו בהמשך, אבל הפונקציה תשתמש בהם (פונקציות ב-JS מונפות)
+async function refreshDynamicBusinessPrompt(tag = 'DynamicKB') {
+  if (!MB_DYNAMIC_KB_URL) {
+    return;
+  }
+
+  try {
+    const res = await fetch(MB_DYNAMIC_KB_URL);
+    if (!res.ok) {
+      console.error(`[ERROR][${tag}] Failed to fetch dynamic KB. HTTP ${res.status}`);
+      return;
+    }
+    const text = (await res.text()).trim();
+    dynamicBusinessPrompt = text;
+    console.log(`[INFO][${tag}] Dynamic KB loaded. length=${text.length}`);
+  } catch (err) {
+    console.error(`[ERROR][${tag}] Error fetching dynamic KB`, err);
+  }
+}
+
+// -----------------------------
 // Helpers – logging
 // -----------------------------
 function logDebug(tag, msg, extra) {
@@ -178,10 +204,29 @@ function buildSystemInstructions() {
       ? `שפות נתמכות: ${MB_LANGUAGES.join(', ')}. ברירת מחדל: עברית. אם הלקוח מדבר באנגלית או רוסית – עוברים לשפה שלו.`
       : 'ברירת מחדל: עברית.';
 
-  const businessKb =
-    MB_BUSINESS_PROMPT && MB_BUSINESS_PROMPT.trim().length > 0
-      ? `\n\nמידע עסקי על "${BUSINESS_NAME}":\n${MB_BUSINESS_PROMPT}\n`
-      : '\n\nאם אין מידע עסקי רלוונטי, להישאר כללית ולהודות בחוסר הוודאות.\n';
+  // חיבור בין KB סטטי (מה-ENV) לבין KB דינאמי מהדרייב
+  const staticKb = MB_BUSINESS_PROMPT && MB_BUSINESS_PROMPT.trim().length > 0
+    ? MB_BUSINESS_PROMPT.trim()
+    : '';
+
+  const dynamicKb = dynamicBusinessPrompt && dynamicBusinessPrompt.trim().length > 0
+    ? dynamicBusinessPrompt.trim()
+    : '';
+
+  let businessKb = '';
+
+  if (staticKb || dynamicKb) {
+    let combined = '';
+    if (staticKb) {
+      combined += `מידע עסקי בסיסי על "${BUSINESS_NAME}":\n${staticKb}\n`;
+    }
+    if (dynamicKb) {
+      combined += `\nלמידה מעודכנת מהשיחות האחרונות והטבלה:\n${dynamicKb}\n`;
+    }
+    businessKb = `\n\n${combined}\n`;
+  } else {
+    businessKb = '\n\nאם אין מידע עסקי רלוונטי, להישאר כללית ולהודות בחוסר הוודאות.\n';
+  }
 
   return `
 אתם עוזר קולי בזמן אמת בשם "${BOT_NAME}" עבור שירות "${BUSINESS_NAME}".
@@ -216,8 +261,6 @@ ${langsTxt}
   - אם המספר כולל 10 ספרות – בעת החזרה על המספר חייבים להקריא 10 ספרות בדיוק. אם שמעתם פחות – בקשו מהלקוח לחזור שוב כדי לא לטעות.
   - לפני שאתם מקריאים מספר, ודאו שיש לכם בדיוק 10 ספרות. אם חסרה ספרה או יש ספק – בקשו שוב מהלקוח לומר אותו, ואל תקצרו או תסכמו.
   - למשל: אם נאמר "0 5 0 3 2 2 2 2 3 7" אתם חייבים להגיד בקול: "אפס, חמש, אפס, שלוש, שתיים, שתיים, שתיים, שתיים, שלוש, שבע" – בלי לדלג על אף "שתיים" ובלי לחבר אותן.
-  - לעולם אל תגידו את המספר כמספר אחד גדול (למשל "חמשת אלפים שלוש מאות") – רק ספרות נפרדות: "חמש, שלוש, אפס, אפס...".
-  - אם אתם לא בטוחים בכל הספרות של המספר – אל תחזרו עליו בכלל. במקום זה תגידו ללקוח שאתם לא בטוחים ובקשו ממנו לחזור שוב על המספר ספרה-ספרה, ולא לקרוא מספר חלקי או שגוי.
 - חשוב: אל תוסיפו או תמציאו ספרות שלא נאמרו בשיחה.
 - בישראל רוב מספרי הסלולר הם באורך 10 ספרות ומתחילים ב-0. אם המספר שאתם לא בטוחים לגביו אינו באורך 10 ספרות או לא מתחיל ב-0 – עדיף להחזיר phone_number: null מאשר לנחש מספר.
 
@@ -366,11 +409,6 @@ async function extractLeadFromConversation(conversationLog) {
   אם המספר שנשמע אינו באורך 10 ספרות או לא מתחיל ב-0 – עדיף להחזיר phone_number: null.
 - "reason": תיאור קצר וקולע בעברית של סיבת הפנייה (משפט אחד קצר).
 - "notes": כל דבר נוסף שיכול להיות רלוונטי לאיש מכירות / שירות (למשל: "מעוניין בדמו לבוט קולי", "פנייה דחופה", "שאל על מחירים" וכו').
-- אם הלקוח מבקש נציג אנושי / שיחה עם איש מכירות / נציג שירות לגבי השירות (למשל "אני רוצה לדבר עם נציג", "תחזרו אליי מנציג", "אפשר מישהו אנושי?"):
-  - התייחס לכך כליד אמיתי: הגדר "is_lead": true גם אם לא נאמר במפורש שהוא רוצה לקנות, כל עוד מדובר בפנייה עסקית.
-  - השתמש בהקשר השיחה כדי לקבוע אם הוא לקוח חדש ("אני לא לקוח שלכם עדיין", "אני רק מתעניין", "רוצה להבין על השירות") או לקוח קיים ("אני כבר עובד אתכם", "אני לקוח שלכם", "יש לי בוט אצלכם", "כבר יש לי מערכת ממכם") ולהגדיר lead_type בהתאם.
-  - אם לא ברור אם הוא חדש או קיים – הגדר lead_type: "unknown".
-  - ב-"reason" או "notes" ציין במפורש שמדובר בבקשה לנציג אנושי.
 
 חשוב:
 - אם נראה שהשיחה היא רק הדגמה / סימולציה / תיאור של תסריט דוגמה לבוט קולי, ולא פנייה אמיתית של לקוח – החזר "is_lead": false ו-"phone_number": null.
@@ -786,271 +824,4 @@ wss.on('connection', (connection, req) => {
 
     const greetingText = MB_OPENING_SCRIPT;
     sendModelPrompt(
-      `פתחי את השיחה עם הלקוח בעברית במשפטים קצרים בסגנון הבא (אפשר טיפה לשנות, אבל לא יותר מדי): "${greetingText}"`,
-      'greeting'
-    );
-  });
-
-  openAiWs.on('message', (data) => {
-    let event;
-    try {
-      event = JSON.parse(data.toString());
-    } catch (err) {
-      logError(tag, 'Failed to parse OpenAI WS message', err);
-      return;
-    }
-
-    if (MB_DEBUG) {
-      logDebug(tag, `OpenAI event type: ${event.type}`, event);
-    }
-
-    switch (event.type) {
-      case 'session.updated':
-        logDebug(tag, 'Session updated', event);
-        break;
-
-      // כל תשובה שנוצרה – נחשב כ-response פעיל (גם אוטומטי מהדיבור)
-      case 'response.created':
-        hasActiveResponse = true;
-        break;
-
-      case 'response.output_audio.delta':
-      case 'response.audio.delta': {
-        if (!event.delta) return;
-        if (connection.readyState !== WebSocket.OPEN) return;
-
-        // הבוט מדבר כרגע – חוסמים barge-in
-        botSpeaking = true;
-
-        const audioDelta = {
-          event: 'media',
-          streamSid,
-          media: { payload: event.delta }
-        };
-        connection.send(JSON.stringify(audioDelta));
-        break;
-      }
-
-      // כשהאודיו של התשובה הסתיים – נטע סיימה לדבר
-      case 'response.output_audio.done':
-      case 'response.audio.done': {
-        botSpeaking = false;
-        hasActiveResponse = false;
-
-        if (pendingHangup) {
-          const { reason, closingMessage } = pendingHangup;
-          pendingHangup = null;
-          endCall(reason, closingMessage);
-        }
-        break;
-      }
-
-      case 'response.output_text.delta':
-        if (typeof event.delta === 'string') {
-          currentBotText += event.delta;
-        }
-        break;
-
-      case 'response.output_text.done':
-      case 'response.completed':
-      case 'response.done':
-        // הטקסט של הבוט מוכן – שומרים בלוג
-        if (currentBotText.trim().length > 0) {
-          conversationLog.push({ from: 'bot', text: currentBotText.trim() });
-          currentBotText = '';
-        }
-        // גם כאן נאפס את הדגל ליתר ביטחון (במיוחד אם יש תשובות טקסט בלבד)
-        hasActiveResponse = false;
-        break;
-
-      case 'conversation.item.input_audio_transcription.completed':
-      case 'response.audio_transcript.done': {
-        const transcript =
-          event.transcript ||
-          (event.output && event.output[0] && event.output[0].content) ||
-          '';
-
-        if (typeof transcript === 'string' && transcript.trim().length > 0) {
-          const clean = transcript.trim();
-          logInfo(tag, 'User transcript:', clean);
-          conversationLog.push({ from: 'user', text: clean });
-          checkUserGoodbye(clean);
-        }
-        break;
-      }
-
-      case 'error':
-        logError(tag, 'OpenAI error event', event);
-        // במקרה של שגיאה – אין עוד תשובה פעילה
-        hasActiveResponse = false;
-        break;
-
-      default:
-        break;
-    }
-  });
-
-  openAiWs.on('close', () => {
-    openAiClosed = true;
-    botSpeaking = false;
-    hasActiveResponse = false;
-    logInfo(tag, 'OpenAI WS connection closed.');
-  });
-
-  openAiWs.on('error', (err) => {
-    logError(tag, 'OpenAI WS error', err);
-    hasActiveResponse = false;
-  });
-
-  // -----------------------------
-  // Twilio WS handlers
-  // -----------------------------
-  connection.on('message', (message) => {
-    let data;
-    try {
-      data = JSON.parse(message.toString());
-    } catch (err) {
-      logError(tag, 'Failed to parse Twilio WS message', err);
-      return;
-    }
-
-    if (MB_DEBUG) {
-      logDebug(tag, `Twilio event: ${data.event}`, data);
-    }
-
-    switch (data.event) {
-      case 'start':
-        streamSid = data.start.streamSid;
-        callSid = data.start.callSid || null;
-
-        // ✅ קריאה חזקה של customParameters כדי שתמיד נקבל את caller (מזוהה)
-        (() => {
-          const cp = data.start.customParameters;
-          let extracted = null;
-
-          if (cp) {
-            if (Array.isArray(cp)) {
-              const found = cp.find((p) => p.name === 'caller');
-              if (found && typeof found.value === 'string') {
-                extracted = found.value;
-              }
-            } else if (typeof cp === 'object') {
-              if (typeof cp.caller === 'string') {
-                extracted = cp.caller;
-              }
-            }
-          }
-
-          callerNumber = extracted || null;
-        })();
-
-        callStartTs = Date.now();
-        lastMediaTs = Date.now();
-        logInfo(
-          tag,
-          `Incoming stream started. streamSid=${streamSid}, callSid=${callSid}, caller=${callerNumber}`
-        );
-
-        // טיימר בדיקת שקט + מגבלת זמן שיחה (5 דקות)
-        idleCheckInterval = setInterval(() => {
-          const now = Date.now();
-          const idleMs = now - lastMediaTs;
-          const callMs = now - callStartTs;
-
-          if (!idleWarningSent && idleMs >= MB_IDLE_WARNING_MS) {
-            sendIdleWarningIfNeeded();
-          }
-
-          if (idleMs >= MB_IDLE_HANGUP_MS) {
-            logInfo(tag, `Idle timeout reached (${idleMs} ms), scheduling hangup.`);
-            scheduleEndCall('idle_timeout', MB_CLOSING_SCRIPT);
-          }
-
-          // אם עברנו את 5 הדקות – נפרדים ומנתקים
-          if (MB_MAX_CALL_MS > 0 && callMs >= MB_MAX_CALL_MS) {
-            logInfo(tag, `Max call duration reached (${callMs} ms), scheduling hangup.`);
-            const finalText =
-              'הזמן שהוקצה לשיחה הסתיים, תודה שדיברתם איתי ויום נעים.';
-            scheduleEndCall('max_duration', finalText);
-          }
-        }, 1000);
-
-        // אזהרה לפני סוף 5 הדקות – לתת אפשרות להתקדם ולהשאיר פרטים
-        if (MB_MAX_CALL_MS > 0 && MB_MAX_WARN_BEFORE_MS > 0) {
-          const warnAt = MB_MAX_CALL_MS - MB_MAX_WARN_BEFORE_MS;
-          if (warnAt > 0) {
-            maxCallTimeout = setTimeout(() => {
-              const warnText =
-                'אנחנו מתקרבים לסיום הזמן לשיחה. אם תרצו להתקדם ולהשאיר פרטים, זה זמן טוב לעשות זאת עכשיו.';
-              sendModelPrompt(
-                `תני ללקוח אזהרה קצרה בסגנון הבא (אפשר לשנות מעט): "${warnText}"`,
-                'max_duration_warning'
-              );
-              if (!hasActiveResponse) {
-                logDebug(tag, 'Max duration warning not sent because of active response.');
-              } else {
-                logInfo(tag, 'Max duration warning sent.');
-              }
-            }, warnAt);
-          }
-        }
-
-        break;
-
-      case 'media':
-        lastMediaTs = Date.now();
-
-        // חוק ברזל: אם הבוט מדבר ואין barge-in – מתעלמים מהאודיו של הלקוח
-        if (!MB_ALLOW_BARGE_IN && botSpeaking) {
-          return;
-        }
-
-        if (openAiReady && openAiWs.readyState === WebSocket.OPEN) {
-          const audioAppend = {
-            type: 'input_audio_buffer.append',
-            audio: data.media.payload
-          };
-          openAiWs.send(JSON.stringify(audioAppend));
-        }
-        break;
-
-      case 'mark':
-        break;
-
-      case 'stop':
-        logInfo(tag, 'Twilio sent stop event – ending call.');
-        endCall('twilio_stop', MB_CLOSING_SCRIPT);
-        break;
-
-      default:
-        logDebug(tag, `Unhandled Twilio event: ${data.event}`);
-        break;
-    }
-  });
-
-  connection.on('close', () => {
-    twilioClosed = true;
-    logInfo(tag, 'Twilio Media Stream WS closed.');
-    if (!openAiClosed && openAiWs.readyState === WebSocket.OPEN) {
-      openAiWs.close();
-    }
-    if (idleCheckInterval) clearInterval(idleCheckInterval);
-    if (maxCallTimeout) clearTimeout(maxCallTimeout);
-    if (hangupGraceTimeout) clearTimeout(hangupGraceTimeout);
-    botSpeaking = false;
-    hasActiveResponse = false;
-  });
-
-  connection.on('error', (err) => {
-    logError(tag, 'Twilio WS error', err);
-  });
-});
-
-// -----------------------------
-// Start server
-// -----------------------------
-server.listen(PORT, () => {
-  console.log(`✅ MisterBot Realtime server listening on port ${PORT}`);
-  console.log(`   /twilio-voice (TwiML)`);
-  console.log(`   /twilio-media-stream (WebSocket for Twilio Media Streams)`);
-});
+      `פתחי את הש
