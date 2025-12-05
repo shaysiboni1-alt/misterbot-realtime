@@ -87,7 +87,8 @@ const MB_IDLE_HANGUP_MS = envNumber('MB_IDLE_HANGUP_MS', 90000);  // 90 שניו
 // מגבלת זמן שיחה – ברירת מחדל 5 דקות (אפשר לשנות ב-ENV אם תרצה)
 const MB_MAX_CALL_MS = envNumber('MB_MAX_CALL_MS', 5 * 60 * 1000);
 const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000); // 45 שניות לפני הסוף
-const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 3000); // זמן המתנה אחרי פרידה לפני ניתוק בכוח
+// העליתי ל־8 שניות כדי לא לחתוך את משפט הסיום
+const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 8000);
 
 // האם מותר ללקוח לקטוע את הבוט (barge-in). ברירת מחדל: false = חוק ברזל שאי אפשר לקטוע.
 const MB_ALLOW_BARGE_IN = envBool('MB_ALLOW_BARGE_IN', false);
@@ -180,6 +181,7 @@ ${langsTxt}
   - אסור לוותר על שום ספרה.
   - אסור לאחד ספרות ("שלושים ושתיים") – יש לומר כל ספרה בנפרד: "שלוש, שתיים".
   - אם אינכם בטוחים במספר – לבקש בנימוס שיחזרו עליו שוב במקום לנחש מספר אחר.
+  - אם המספר כולל 10 ספרות – בעת החזרה על המספר חייבים להקריא 10 ספרות בדיוק. אם שמעתם פחות – בקשו מהלקוח לחזור שוב כדי לא לטעות.
 - אם הלקוח אומר "תחזרו למספר שממנו אני מתקשר" או "למספר המזוהה":
   - אל תקריאו מספר בקול.
   - תגידו משפט בסגנון: "מעולה, ירשם שנחזור אליכם למספר שממנו אתם מתקשרים כעת."
@@ -207,17 +209,20 @@ ${langsTxt}
   2. אחרי שהתשובה מגיעה: לשאול אם יש שם עסק. אם אין – לדלג הלאה.
   3. אחר כך: "מה מספר הטלפון שנוח לחזור אליכם אליו?" (לבקש ספרה-ספרה ולהקריא בחזרה במדויק).
   4. לבסוף: לבקש במשפט אחד קצר מה סיבת הפנייה.
-- בסיום איסוף הפרטים: לסכם בקצרה ללקוח את מה שנרשם ולוודא שזה נכון.
-- אם הלקוח לא מוכן להשאיר פרטים – לכבד זאת, להודות לו ולהמשיך שיחה כללית או לסיים בעדינות.
+- בסיום איסוף הפרטים:
+  - לסכם בקצרה ללקוח את מה שנרשם ולוודא שזה נכון.
+  - אחרי הסיכום תמיד לשאול: "יש עוד משהו שתרצו לשאול או לבדוק?".
+  - אם הלקוח עונה "לא", "לא תודה", "זהו", "זה הכל" וכדומה – לסיים במשפט סיום קצר ומכבד ולהיפרד.
 
 דוגמאות / סימולציה של בוטים קוליים:
 - אם לקוח בכל שפה מבקש "לשמוע דוגמה של בוט קולי", "סימולציה", "דמו" וכדומה:
   1. קודם לשאול: "לאיזה סוג עסק תרצו לשמוע דוגמה? למשל מסעדה, מרפאת שיניים, רופאה, עורך דין, מספרה, חנות בגדים וכדומה."
-  2. אחרי שהלקוח בוחר סוג עסק – להדגים שיחה קצרה בסגנון:
+  2. אחרי שהלקוח בוחר סוג עסק – להדגים שיחה קצרה באותה השפה שבה הלקוח מדבר כעת, בסגנון:
      - "לקוח: ..." / "בוט: ..." (או פשוט לדבר כקול של הבוט מול "לקוח").
      - להראות איך הבוט מקבל מידע, קובע תור, עונה לשאלות נפוצות וכו'.
   3. להבהיר שהשיחה היא רק דוגמה, ולא שיחה אמיתית למקום אמיתי.
   4. בזמן הדוגמה לא לאסוף פרטים אמיתיים של מי שמדבר איתכם עכשיו (שם, טלפון שלו). איסוף פרטים אמיתי יהיה רק אם הלקוח מבקש להתקדם באמת.
+- אסור לומר "אני לא יכולה לעשות סימולציה" או "אני רק אחבר אתכם לנציג" רק בגלל שביקשו דוגמה. רק אם הלקוח מבקש במפורש נציג אנושי – אפשר להציע חזרה מנציג.
 
 סיום שיחה:
 - אם הלקוח אומר "זהו", "זהו זה", "זה הכל", "זה הכול", "סיימנו", "מספיק לעכשיו", "להתראות", "ביי", "ביי ביי", "יאללה ביי",
@@ -248,15 +253,19 @@ app.post('/twilio-voice', (req, res) => {
     process.env.MB_TWILIO_STREAM_URL ||
     `wss://${host.replace(/^https?:\/\//, '')}/twilio-media-stream`;
 
+  const caller = req.body.From || '';
+
   const twiml = `
 <?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="${wsUrl}" />
+    <Stream url="${wsUrl}">
+      <Parameter name="caller" value="${caller}"/>
+    </Stream>
   </Connect>
 </Response>`.trim();
 
-  logInfo('Twilio-Voice', `Returning TwiML with Stream URL: ${wsUrl}`);
+  logInfo('Twilio-Voice', `Returning TwiML with Stream URL: ${wsUrl}, From=${caller}`);
   res.type('text/xml').send(twiml);
 });
 
@@ -310,8 +319,8 @@ async function extractLeadFromConversation(conversationLog) {
 הסברים:
 - "is_lead": true אם ברור שיש כאן פנייה עסקית / התעניינות אמיתית בשירות / הזמנת שירות. אחרת false.
 - "lead_type": "new" אם מדובר בלקוח חדש, "existing" אם הוא מציין שהוא לקוח קיים, אחרת "unknown".
-- "full_name": אם הלקוח נותן שם (פרטי או מלא) – כתוב כפי שנשמע. אם לא ברור – null.
-- "business_name": אם הלקוח מזכיר שם עסק – כתוב כפי שנשמע. אחרת null.
+- "full_name": אם הלקוח נותן שם (פרטי או מלא) – כתוב כפי שנשמע. אם השם נאמר בעברית, כתוב אותו באותיות עבריות ולא באנגלית. אם לא ברור – null.
+- "business_name": אם הלקוח מזכיר שם עסק – כתוב כפי שנשמע. אם שם העסק נאמר בעברית, כתוב אותו באותיות עבריות ולא באנגלית. אחרת null.
 - "phone_number": אם בשיחה מופיע מספר טלפון של הלקוח – החזר אותו כרצף ספרות בלבד, בלי רווחים ובלי +972 ובלי להוריד 0 בהתחלה.
   אם נשמעים כמה מספרים – בחר את המספר הרלוונטי ביותר ליצירת קשר, אחרת null.
 - "reason": תיאור קצר וקולע בעברית של סיבת הפנייה (משפט אחד קצר).
@@ -319,6 +328,7 @@ async function extractLeadFromConversation(conversationLog) {
 
 חשוב:
 - אם נראה שהשיחה היא רק הדגמה / סימולציה / תיאור של תסריט דוגמה לבוט קולי, ולא פנייה אמיתית של לקוח – החזר "is_lead": false ו-"phone_number": null.
+- אם רוב השיחה היא בעברית – העדף עברית בכל השדות הטקסטואליים (reason, notes, שמות אם נאמרו בעברית וכו').
 
 החזר אך ורק JSON תקין לפי הסכמה, בלי טקסט נוסף, בלי הסברים ובלי הערות.
 `.trim();
@@ -395,6 +405,7 @@ wss.on('connection', (connection, req) => {
   const instructions = buildSystemInstructions();
   let streamSid = null;
   let callSid = null;
+  let callerNumber = null;
 
   const openAiWs = new WebSocket(
     'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17',
@@ -422,6 +433,16 @@ wss.on('connection', (connection, req) => {
   let botSpeaking = false;
 
   // -----------------------------
+  // Helper: האם הלקוח ביקש חזרה למספר המזוהה
+  // -----------------------------
+  function conversationMentionsCallerId() {
+    const patterns = [/מזוהה/, /למספר שממנו/, /למספר שממנו אני מתקשר/, /למספר שממנו התקשרתי/];
+    return conversationLog.some(
+      (m) => m.from === 'user' && patterns.some((re) => re.test(m.text || ''))
+    );
+  }
+
+  // -----------------------------
   // Helper: שליחת וובהוק לידים / לוג
   // -----------------------------
   async function sendLeadWebhook(reason, closingMessage) {
@@ -435,6 +456,15 @@ wss.on('connection', (connection, req) => {
       if (!parsedLead) {
         logInfo(tag, 'No parsed lead – skipping webhook.');
         return;
+      }
+
+      // אם הלקוח ביקש חזרה למספר המזוהה ואין מספר בליד – נשתמש ב-callerNumber
+      if (!parsedLead.phone_number && callerNumber && conversationMentionsCallerId()) {
+        parsedLead.phone_number = callerNumber;
+        parsedLead.notes =
+          (parsedLead.notes || '') +
+          (parsedLead.notes ? ' ' : '') +
+          'הלקוח ביקש חזרה למספר המזוהה ממנו התקשר.';
       }
 
       const hasContactDetails =
@@ -452,6 +482,7 @@ wss.on('connection', (connection, req) => {
       const payload = {
         streamSid,
         callSid,
+        callerNumber,
         botName: BOT_NAME,
         businessName: BUSINESS_NAME,
         startedAt: new Date(callStartTs).toISOString(),
@@ -585,6 +616,14 @@ wss.on('connection', (connection, req) => {
       'תודה זהו',
       'טוב תודה',
       'טוב, תודה',
+      'לא תודה',
+      'לא, תודה',
+      'לא צריך',
+      'לא צריך תודה',
+      'אין, תודה',
+      'אין תודה',
+      'זהו תודה',
+      'זה הכל תודה',
       'שיהיה יום טוב',
       'שיהיה לכם יום טוב',
       'לילה טוב',
@@ -593,7 +632,7 @@ wss.on('connection', (connection, req) => {
       'bye',
       'bye bye',
       'ok thanks',
-      'that\'s all',
+      "that's all",
       'that is all'
     ];
 
@@ -805,9 +844,14 @@ wss.on('connection', (connection, req) => {
       case 'start':
         streamSid = data.start.streamSid;
         callSid = data.start.callSid || null;
+        callerNumber =
+          (data.start.customParameters && data.start.customParameters.caller) || null;
         callStartTs = Date.now();
         lastMediaTs = Date.now();
-        logInfo(tag, `Incoming stream started. streamSid=${streamSid}, callSid=${callSid}`);
+        logInfo(
+          tag,
+          `Incoming stream started. streamSid=${streamSid}, callSid=${callSid}, caller=${callerNumber}`
+        );
 
         // טיימר בדיקת שקט + מגבלת זמן שיחה (5 דקות)
         idleCheckInterval = setInterval(() => {
