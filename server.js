@@ -89,7 +89,7 @@ const MB_IDLE_HANGUP_MS = envNumber('MB_IDLE_HANGUP_MS', 90000);  // 90 שניו
 // מגבלת זמן שיחה – ברירת מחדל 5 דקות (אפשר לשנות ב-ENV אם תרצה)
 const MB_MAX_CALL_MS = envNumber('MB_MAX_CALL_MS', 5 * 60 * 1000);
 const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000); // 45 שניות לפני הסוף
-// העליתי ל־8 שניות כדי לא לחתוך את משפט הסיום
+// זמן חסד לפני ניתוק סופי אחרי סגיר – כדי לא לחתוך את המשפט
 const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 8000);
 
 // האם מותר ללקוח לקטוע את הבוט (barge-in). ברירת מחדל: false = חוק ברזל שאי אפשר לקטוע.
@@ -132,6 +132,36 @@ function logError(tag, msg, extra) {
   } else {
     console.error(`[ERROR][${tag}] ${msg}`);
   }
+}
+
+// -----------------------------
+// Helper – נורמליזציה למספר טלפון (10 ספרות ישראלי)
+// -----------------------------
+function normalizePhoneNumber(rawPhone, callerNumber) {
+  function clean(num) {
+    if (!num) return null;
+    let digits = String(num).replace(/\D/g, '');
+
+    // אם הגיע בפורמט בינלאומי ישראלי (+97250...) – נהפוך ל-0...
+    if (digits.startsWith('972') && digits.length === 12) {
+      digits = '0' + digits.slice(3); // 97250xxxxxxx -> 050xxxxxxx
+    }
+
+    if (/^0\d{9}$/.test(digits)) {
+      return digits;
+    }
+    return null;
+  }
+
+  // קודם כל המספר שה-parser מצא מהשיחה
+  const fromLead = clean(rawPhone);
+  if (fromLead) return fromLead;
+
+  // אם הוא לא תקין – ננסה את ה-callerID מטוויליו
+  const fromCaller = clean(callerNumber);
+  if (fromCaller) return fromCaller;
+
+  return null;
 }
 
 // -----------------------------
@@ -186,6 +216,9 @@ ${langsTxt}
   - אם המספר כולל 10 ספרות – בעת החזרה על המספר חייבים להקריא 10 ספרות בדיוק. אם שמעתם פחות – בקשו מהלקוח לחזור שוב כדי לא לטעות.
   - לפני שאתם מקריאים מספר, ודאו שיש לכם בדיוק 10 ספרות. אם חסרה ספרה או יש ספק – בקשו שוב מהלקוח לומר אותו, ואל תקצרו או תסכמו.
   - למשל: אם נאמר "0 5 0 3 2 2 2 2 3 7" אתם חייבים להגיד בקול: "אפס, חמש, אפס, שלוש, שתיים, שתיים, שתיים, שתיים, שלוש, שבע" – בלי לדלג על אף "שתיים" ובלי לחבר אותן.
+- חשוב: אל תוסיפו או תמציאו ספרות שלא נאמרו בשיחה.
+- בישראל רוב מספרי הסלולר הם באורך 10 ספרות ומתחילים ב-0. אם המספר שאתם לא בטוחים לגביו אינו באורך 10 ספרות או לא מתחיל ב-0 – עדיף להחזיר phone_number: null מאשר לנחש מספר.
+
 - אם הלקוח אומר "תחזרו למספר שממנו אני מתקשר" או "למספר המזוהה":
   - אל תקריאו מספר בקול.
   - תגידו משפט בסגנון: "מעולה, ירשם שנחזור אליכם למספר שממנו אתם מתקשרים כעת."
@@ -327,6 +360,8 @@ async function extractLeadFromConversation(conversationLog) {
 - "business_name": אם הלקוח מזכיר שם עסק – כתוב כפי שנשמע. אם שם העסק נאמר בעברית, כתוב אותו באותיות עבריות ולא באנגלית. אחרת null.
 - "phone_number": אם בשיחה מופיע מספר טלפון של הלקוח – החזר אותו כרצף ספרות בלבד, בלי רווחים ובלי +972 ובלי להוריד 0 בהתחלה.
   אם נשמעים כמה מספרים – בחר את המספר הרלוונטי ביותר ליצירת קשר, אחרת null.
+  אל תוסיף ספרות שלא נאמרו, ואל תנחש מספר אם לא ברור.
+  אם המספר שנשמע אינו באורך 10 ספרות או לא מתחיל ב-0 – עדיף להחזיר phone_number: null.
 - "reason": תיאור קצר וקולע בעברית של סיבת הפנייה (משפט אחד קצר).
 - "notes": כל דבר נוסף שיכול להיות רלוונטי לאיש מכירות / שירות (למשל: "מעוניין בדמו לבוט קולי", "פנייה דחופה", "שאל על מחירים" וכו').
 
@@ -511,6 +546,12 @@ wss.on('connection', (connection, req) => {
           'הלקוח ביקש חזרה למספר המזוהה ממנו התקשר.';
       }
 
+      // נורמליזציה למספר טלפון (10 ספרות). אם לא תקין – ננסה callerID, ואם גם הוא לא תקין – phone_number=null.
+      parsedLead.phone_number = normalizePhoneNumber(
+        parsedLead.phone_number,
+        callerNumber
+      );
+
       const isFullLead =
         parsedLead.is_lead === true &&
         (parsedLead.lead_type === 'new' || parsedLead.lead_type === 'existing') &&
@@ -528,7 +569,8 @@ wss.on('connection', (connection, req) => {
       const payload = {
         streamSid,
         callSid,
-        callerNumber, // מספר מזוהה כפי שהגיע מטוויליו
+        callerNumber, // מספר מזוהה כפי שהגיע מטוויליו (גלם)
+        callerId: callerNumber, // אליאס מפורש ל-CALLER ID לשימוש ב-Make
         botName: BOT_NAME,
         businessName: BUSINESS_NAME,
         startedAt: new Date(callStartTs).toISOString(),
@@ -759,6 +801,11 @@ wss.on('connection', (connection, req) => {
     switch (event.type) {
       case 'session.updated':
         logDebug(tag, 'Session updated', event);
+        break;
+
+      // כל תשובה שנוצרה – נחשב כ-response פעיל (גם אוטומטי מהדיבור)
+      case 'response.created':
+        hasActiveResponse = true;
         break;
 
       case 'response.output_audio.delta':
