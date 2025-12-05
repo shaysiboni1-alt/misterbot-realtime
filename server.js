@@ -13,6 +13,7 @@
 //   npm install express ws dotenv
 //   (מומלץ Node 18+ כדי ש-fetch יהיה זמין גלובלית)
 //
+//
 // להרצה (למשל):
 //   PORT=3000 node server.js
 //
@@ -225,8 +226,9 @@ ${langsTxt}
 - אסור לומר "אני לא יכולה לעשות סימולציה" או "אני רק אחבר אתכם לנציג" רק בגלל שביקשו דוגמה. רק אם הלקוח מבקש במפורש נציג אנושי – אפשר להציע חזרה מנציג.
 
 סיום שיחה:
-- אם הלקוח אומר "זהו", "זהו זה", "זה הכל", "זה הכול", "סיימנו", "מספיק לעכשיו", "להתראות", "ביי", "ביי ביי", "יאללה ביי",
-  "טוב תודה", "טוב תודה, זהו", "בסדר תודה", "שיהיה יום טוב", "לילה טוב", "שבוע טוב", "goodbye", "bye", "ok thanks" וכדומה –
+- אם הלקוח אומר "זהו", "זהו זה", "זה הכל", "זה הכול", "סיימנו", "מספיק לעכשיו", "להתראות", "להתראות לך",
+  "ביי", "ביי ביי", "יאללה ביי", "יאללה, ביי", "טוב תודה", "טוב תודה, זהו", "בסדר תודה", "שיהיה יום טוב",
+  "לילה טוב", "שבוע טוב", "goodbye", "bye", "bye bye", "ok thanks", "that's all", "that is all" וכדומה –
   להבין שזאת סיום שיחה.
 - במקרה כזה – לתת משפט סיכום קצר וחיובי, ולהיפרד בעדינות.
 
@@ -483,6 +485,7 @@ wss.on('connection', (connection, req) => {
         streamSid,
         callSid,
         callerNumber,
+        callerId: callerNumber, // תמיד שולחים גם שדה מזוהה קבוע
         botName: BOT_NAME,
         businessName: BUSINESS_NAME,
         startedAt: new Date(callStartTs).toISOString(),
@@ -690,7 +693,8 @@ wss.on('connection', (connection, req) => {
         voice: OPENAI_VOICE,
         input_audio_format: 'g711_ulaw',
         output_audio_format: 'g711_ulaw',
-        input_audio_transcription: { model: 'whisper-1' },
+        // ✅ תיקון: לכפות זיהוי בעברית כדי למנוע תמלול באנגלית
+        input_audio_transcription: { model: 'whisper-1', language: 'he' },
         turn_detection: {
           type: 'server_vad',
           threshold: MB_VAD_THRESHOLD,
@@ -844,8 +848,28 @@ wss.on('connection', (connection, req) => {
       case 'start':
         streamSid = data.start.streamSid;
         callSid = data.start.callSid || null;
-        callerNumber =
-          (data.start.customParameters && data.start.customParameters.caller) || null;
+
+        // ✅ תיקון: לוודא שתמיד נצליח לשלוף את פרמטר "caller" (מזוהה)
+        (() => {
+          const cp = data.start.customParameters;
+          let extracted = null;
+
+          if (cp) {
+            if (Array.isArray(cp)) {
+              const found = cp.find((p) => p.name === 'caller');
+              if (found && typeof found.value === 'string') {
+                extracted = found.value;
+              }
+            } else if (typeof cp === 'object') {
+              if (typeof cp.caller === 'string') {
+                extracted = cp.caller;
+              }
+            }
+          }
+
+          callerNumber = extracted || null;
+        })();
+
         callStartTs = Date.now();
         lastMediaTs = Date.now();
         logInfo(
