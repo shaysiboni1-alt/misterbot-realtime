@@ -3,6 +3,7 @@
 // MisterBot Realtime Voice Bot – "נטע"
 // Twilio Media Streams <-> OpenAI Realtime API (gpt-4o-realtime-preview-2024-12-17)
 //
+//
 // חוקים עיקריים לפי ה-MASTER PROMPT:
 // - שיחה בעברית כברירת מחדל, לשון רבים, טון חם וקצר.
 // - שליטה מלאה דרך ENV (פתיח, סגיר, פרומפט כללי, KB עסקי, טיימרים, לידים, VAD).
@@ -226,9 +227,8 @@ ${langsTxt}
 - אסור לומר "אני לא יכולה לעשות סימולציה" או "אני רק אחבר אתכם לנציג" רק בגלל שביקשו דוגמה. רק אם הלקוח מבקש במפורש נציג אנושי – אפשר להציע חזרה מנציג.
 
 סיום שיחה:
-- אם הלקוח אומר "זהו", "זהו זה", "זה הכל", "זה הכול", "סיימנו", "מספיק לעכשיו", "להתראות", "להתראות לך",
-  "ביי", "ביי ביי", "יאללה ביי", "יאללה, ביי", "טוב תודה", "טוב תודה, זהו", "בסדר תודה", "שיהיה יום טוב",
-  "לילה טוב", "שבוע טוב", "goodbye", "bye", "bye bye", "ok thanks", "that's all", "that is all" וכדומה –
+- אם הלקוח אומר "זהו", "זהו זה", "זה הכל", "זה הכול", "סיימנו", "מספיק לעכשיו", "להתראות", "ביי", "ביי ביי", "יאללה ביי",
+  "טוב תודה", "טוב תודה, זהו", "בסדר תודה", "שיהיה יום טוב", "לילה טוב", "שבוע טוב", "goodbye", "bye", "ok thanks" וכדומה –
   להבין שזאת סיום שיחה.
 - במקרה כזה – לתת משפט סיכום קצר וחיובי, ולהיפרד בעדינות.
 
@@ -453,11 +453,19 @@ wss.on('connection', (connection, req) => {
       return;
     }
     try {
-      const parsedLead = await extractLeadFromConversation(conversationLog);
+      let parsedLead = await extractLeadFromConversation(conversationLog);
 
-      if (!parsedLead) {
-        logInfo(tag, 'No parsed lead – skipping webhook.');
-        return;
+      // תמיד מוודאים שיש אובייקט לוגי, גם אם המודל לא החזיר כלום
+      if (!parsedLead || typeof parsedLead !== 'object') {
+        parsedLead = {
+          is_lead: false,
+          lead_type: 'unknown',
+          full_name: null,
+          business_name: null,
+          phone_number: null,
+          reason: null,
+          notes: ''
+        };
       }
 
       // אם הלקוח ביקש חזרה למספר המזוהה ואין מספר בליד – נשתמש ב-callerNumber
@@ -469,23 +477,10 @@ wss.on('connection', (connection, req) => {
           'הלקוח ביקש חזרה למספר המזוהה ממנו התקשר.';
       }
 
-      const hasContactDetails =
-        !!(parsedLead.phone_number || parsedLead.full_name || parsedLead.business_name);
-
-      if (!parsedLead.is_lead || !hasContactDetails) {
-        logInfo(
-          tag,
-          'Parsed lead is not a valid lead or missing contact details – skipping webhook.',
-          parsedLead
-        );
-        return;
-      }
-
       const payload = {
         streamSid,
         callSid,
-        callerNumber,
-        callerId: callerNumber, // תמיד שולחים גם שדה מזוהה קבוע
+        callerNumber,         // מספר מזוהה כפי שהגיע מטוויליו
         botName: BOT_NAME,
         businessName: BUSINESS_NAME,
         startedAt: new Date(callStartTs).toISOString(),
@@ -693,7 +688,7 @@ wss.on('connection', (connection, req) => {
         voice: OPENAI_VOICE,
         input_audio_format: 'g711_ulaw',
         output_audio_format: 'g711_ulaw',
-        // ✅ תיקון: לכפות זיהוי בעברית כדי למנוע תמלול באנגלית
+        // ✅ תמלול בכוונה בעברית כדי למנוע תרגום לאנגלית
         input_audio_transcription: { model: 'whisper-1', language: 'he' },
         turn_detection: {
           type: 'server_vad',
@@ -849,7 +844,7 @@ wss.on('connection', (connection, req) => {
         streamSid = data.start.streamSid;
         callSid = data.start.callSid || null;
 
-        // ✅ תיקון: לוודא שתמיד נצליח לשלוף את פרמטר "caller" (מזוהה)
+        // ✅ קריאה חזקה של customParameters כדי שתמיד נקבל את caller (מזוהה)
         (() => {
           const cp = data.start.customParameters;
           let extracted = null;
