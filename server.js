@@ -98,7 +98,7 @@ const MB_IDLE_HANGUP_MS = envNumber('MB_IDLE_HANGUP_MS', 90000);  // 90 שניו
 // מגבלת זמן שיחה – ברירת מחדל 5 דקות
 const MB_MAX_CALL_MS = envNumber('MB_MAX_CALL_MS', 5 * 60 * 1000);
 const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000); // 45 שניות לפני הסוף
-// כאן כן נשתמש – כמה זמן אחרי הסגיר לנתק בכוח
+// כמה זמן אחרי הסגיר לנתק בכוח
 const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 5000);
 
 // האם מותר ללקוח לקטוע את הבוט (barge-in)
@@ -115,7 +115,7 @@ const MB_LEAD_PARSING_MODEL = process.env.MB_LEAD_PARSING_MODEL || 'gpt-4.1-mini
 // Debug
 const MB_DEBUG = envBool('MB_DEBUG', false);
 
-// Twilio credentials לניתוק אקטיבי
+// Twilio credentials לניתוק אקטיבי + שליפת פרטי שיחה
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || '';
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
 
@@ -405,6 +405,7 @@ app.post('/twilio-voice', (req, res) => {
     process.env.MB_TWILIO_STREAM_URL ||
     `wss://${host.replace(/^https?:\/\//, '')}/twilio-media-stream`;
 
+  // {{trigger.call.From}} של טוויליו = req.body.From כאן
   const caller = req.body.From || '';
 
   const twiml = `
@@ -589,6 +590,53 @@ async function hangupTwilioCall(callSid, tag = 'Call') {
 }
 
 // -----------------------------
+// Helper – שליפה אקטיבית של המספר המזוהה מטוויליו לפי callSid
+// -----------------------------
+async function fetchCallerNumberFromTwilio(callSid, tag = 'Call') {
+  if (!callSid) {
+    logDebug(tag, 'fetchCallerNumberFromTwilio: no callSid provided.');
+    return null;
+  }
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
+    logDebug(
+      tag,
+      'fetchCallerNumberFromTwilio: missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN.'
+    );
+    return null;
+  }
+
+  try {
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}.json`;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Authorization:
+          'Basic ' +
+          Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64')
+      }
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      logError(tag, `fetchCallerNumberFromTwilio HTTP ${res.status}`, txt);
+      return null;
+    }
+
+    const data = await res.json();
+    const fromRaw = data.from || data.caller_name || null;
+
+    logInfo(
+      tag,
+      `fetchCallerNumberFromTwilio: resolved caller="${fromRaw}" from Twilio Call resource.`
+    );
+    return fromRaw;
+  } catch (err) {
+    logError(tag, 'fetchCallerNumberFromTwilio: error fetching from Twilio', err);
+    return null;
+  }
+}
+
+// -----------------------------
 // Per-call handler
 // -----------------------------
 wss.on('connection', (connection, req) => {
@@ -687,6 +735,14 @@ wss.on('connection', (connection, req) => {
     }
 
     try {
+      // אם משום מה callerNumber ריק – נשלוף אותו מטוויליו לפי callSid (אותו From של {{trigger.call.From}})
+      if (!callerNumber && callSid) {
+        const resolved = await fetchCallerNumberFromTwilio(callSid, tag);
+        if (resolved) {
+          callerNumber = resolved;
+        }
+      }
+
       let parsedLead = await extractLeadFromConversation(conversationLog);
 
       if (!parsedLead || typeof parsedLead !== 'object') {
@@ -749,7 +805,7 @@ wss.on('connection', (connection, req) => {
         callerIdNormalized ||
         callerIdRaw;
 
-      // CALLERID = תמיד המזוהה
+      // CALLERID = תמיד המזוהה (לפחות גולמי)
       const finalCallerId =
         callerIdNormalized ||
         callerIdRaw ||
@@ -812,14 +868,14 @@ wss.on('connection', (connection, req) => {
     if (maxCallTimeout) clearTimeout(maxCallTimeout);
     if (maxCallWarningTimeout) clearTimeout(maxCallWarningTimeout);
 
-    // 🔔 לא מחכים ל-webhook – שולחים בפייר אנד פורגט
+    // לא מחכים ל-webhook – שולחים בפייר אנד פורגט
     if (MB_ENABLE_LEAD_CAPTURE && MB_WEBHOOK_URL) {
       sendLeadWebhook(reason, closingMessage || MB_CLOSING_SCRIPT).catch((err) =>
         logError(tag, 'sendLeadWebhook fire-and-forget error', err)
       );
     }
 
-    // 🔄 ריענון KB דינאמי אחרי סיום שיחה (בפייר-אנד-פורגט, עם Throttling)
+    // ריענון KB דינאמי אחרי סיום שיחה
     if (MB_DYNAMIC_KB_URL) {
       refreshDynamicBusinessPrompt('PostCall').catch((err) =>
         logError(tag, 'DynamicKB post-call refresh failed', err)
@@ -847,8 +903,7 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: תזמון סיום שיחה אחרי סגיר – חוק ברזל:
-  // אומרים סגיר קצר, וברגע שהוא נגמר – ניתוק. הטיימר נשאר רק כ-fallback.
+  // Helper: תזמון סיום שיחה אחרי סגיר
   // -----------------------------
   function scheduleEndCall(reason, closingMessage) {
     if (callEnded) return;
@@ -1144,6 +1199,7 @@ wss.on('connection', (connection, req) => {
     if (event === 'start') {
       streamSid = msg.start?.streamSid || null;
       callSid = msg.start?.callSid || null;
+      // כאן אנחנו אוספים את מה ששלחנו מ-/twilio-voice => זה אותו ערך של {{trigger.call.From}}
       callerNumber = msg.start?.customParameters?.caller || null;
       callStartTs = Date.now();
       lastMediaTs = Date.now();
@@ -1243,5 +1299,5 @@ server.listen(PORT, () => {
   refreshDynamicBusinessPrompt('Startup').catch((err) =>
     console.error('[ERROR][DynamicKB] initial load failed', err)
   );
-  // ❌ אין יותר setInterval – מעכשיו ריענון KB קורה רק אחרי שיחות (PostCall + Throttling)
+  // אין יותר setInterval – מעכשיו ריענון KB קורה רק אחרי שיחות (PostCall + Throttling)
 });
