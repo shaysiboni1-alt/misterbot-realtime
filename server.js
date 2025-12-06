@@ -850,7 +850,8 @@ wss.on('connection', (connection, req) => {
         break;
       }
 
-      case 'response.output_audio.delta': {
+      // ⚠️ כאן התיקון: מאזינים ל־response.audio.delta ולא ל־response.output_audio.delta
+      case 'response.audio.delta': {
         const b64 = msg.delta;
         if (!b64 || !streamSid) break;
         botSpeaking = true;
@@ -865,7 +866,7 @@ wss.on('connection', (connection, req) => {
         break;
       }
 
-      case 'response.output_audio.done':
+      case 'response.audio.done':
       case 'response.completed': {
         botSpeaking = false;
         hasActiveResponse = false;
@@ -889,13 +890,11 @@ wss.on('connection', (connection, req) => {
       }
 
       case 'error': {
-        // ⚠️ שגיאה מה-Realtime – חשוב לראות בלוגים
         logError(tag, 'OpenAI Realtime error event', msg);
         break;
       }
 
       default:
-        // שאר האירועים פחות קריטיים
         break;
     }
   });
