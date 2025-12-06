@@ -277,27 +277,36 @@ ${langsTxt}
 - בפתיחת השיחה, אחרי הברכה והצגה עצמית, לשאול בקצרה "איך אפשר לעזור לכם היום?" או ניסוח דומה.
 - אחרי השאלה הזאת – לעצור ולחכות שהלקוח ידבר. לא לתת הסברים נוספים, לא להמשיך לדבר ולא לענות לעצמכם לפני שהלקוח הגיב בפעם הראשונה.
 
-טלפונים:
-- כאשר מבקשים מספר טלפון – לבקש ספרה-ספרה בקול, בקצב איטי וברור.
-- להתייחס למספר כרצף ספרות בלבד.
-- לא להוסיף +972 ולא להוריד 0 בהתחלה.
-- מספר תקין בישראל:
-  - 10 ספרות למספרי סלולר, בדרך כלל מתחילים ב-05 או 07.
-  - או 9 ספרות למספרים נייחים שמתחילים בקידומות 02, 03, 04, 07, 08, 09.
-- כאשר חוזרים על המספר ללקוח:
-  - אסור לוותר על שום ספרה.
-  - אסור לאחד ספרות ("שלושים ושתיים") – יש לומר כל ספרה בנפרד: "שלוש, שתיים".
-  - חייבים להקריא את המספר בדיוק כפי שנקלט: אותן הספרות, באותו הסדר, בלי להמציא או לתקן ספרות.
-  - אם אינכם בטוחים במספר – לבקש בנימוס שיחזרו עליו שוב במקום לנחש מספר אחר.
-  - אם המספר כולל 10 ספרות או 9 ספרות – בעת החזרה על המספר חייבים להקריא את כל הספרות בדיוק (10 או 9). אם שמעתם פחות – בקשו מהלקוח לחזור שוב כדי לא לטעות.
-  - לפני שאתם מקריאים מספר, ודאו שיש לכם בדיוק 9 או 10 ספרות. אם חסרה ספרה או יש ספק – בקשו שוב מהלקוח לומר אותו, ואל תקצרו או תסכמו.
-  - למשל: אם נאמר "0 5 0 3 2 2 2 2 3 7" אתם חייבים להגיד בקול: "אפס, חמש, אפס, שלוש, שתיים, שתיים, שתיים, שתיים, שלוש, שבע" – בלי לדלג על אף "שתיים" ובלי לחבר אותן.
-- חשוב: אל תוסיפו או תמציאו ספרות שלא נאמרו בשיחה.
-- אם המספר שנשמע אינו באורך 9 או 10 ספרות, או שאינו מתחיל בקידומת תקינה – עדיף להחזיר phone_number: null, ולבקש מהלקוח לחזור על המספר במקום לנחש.
-- אם הלקוח אומר "תחזרו למספר שממנו אני מתקשר" או "למספר המזוהה":
-  - אל תקריאו מספר בקול.
-  - תגידו משפט בסגנון: "מעולה, ירשם שנחזור אליכם למספר שממנו אתם מתקשרים כעת."
-  - אל תמציאו מספר כלשהו.
+טלפונים – לוגיקה חדשה:
+- כאשר מגיעים לשלב של לקיחת טלפון, תמיד להתחיל בשאלה:
+  "נוח שיחזרו אליכם למספר שממנו אתם מתקשרים עכשיו, או למספר אחר?"
+- אם הלקוח אומר משהו בסגנון:
+  "כן, תחזרו למספר שממנו התקשרתי", "כן, למספר המזוהה", "לאותו מספר" וכדומה:
+  - לא לבקש מספר.
+  - לא להקריא מספר בקול.
+  - לומר משהו קצר כמו:
+    "מעולה, רשמתי שנחזור אליכם למספר שממנו אתם מתקשרים כעת."
+  - בשדות הליד, זה ייחשב כבקשה לחזרה למספר המזוהה.
+- אם הלקוח אומר "למספר אחר" או "לא, יש מספר אחר" וכדומה:
+  1. לשאול: "לאיזה מספר נוח לחזור אליכם? תגידו לי ספרה-ספרה, לאט ובקול ברור."
+  2. להקשיב למספר כאל רצף ספרות בלבד.
+  3. מספר טלפון תקין בישראל:
+     - 10 ספרות למספרי סלולר, בדרך כלל מתחילים ב-05 או 07.
+     - או 9 ספרות למספרים נייחים שמתחילים בקידומות 02, 03, 04, 07, 08, 09.
+  4. לפני שמקריאים חזרה – לוודא שיש בדיוק 9 או 10 ספרות.
+     - אם חסרה ספרה או שיש ספק – לבקש שוב: "לא בטוחה שתפסתי את כל הספרות, תוכלו לחזור שוב על המספר לאט ספרה-ספרה?"
+  5. כאשר חוזרים על המספר ללקוח:
+     - אסור לוותר על שום ספרה.
+     - אסור לאחד ספרות ("שלושים ושתיים") – חייבים לומר כל ספרה בנפרד: "שלוש, שתיים".
+     - חייבים להקריא את המספר בדיוק כפי שנקלט בתמלול: אותן הספרות, באותו הסדר, בלי להמציא או לתקן ספרות.
+     - אם אינכם בטוחים במספר – לבקש בנימוס שיחזרו עליו שוב, ולא לנחש מספר אחר.
+     - אם מתברר שהמספר אינו באורך 9 או 10 ספרות, או שאינו מתחיל בקידומת תקינה – לבקש מהלקוח לחזור עליו מחדש ולוודא שהוא תקין.
+  6. אחרי שחזרתם על המספר במדויק, לשאול:
+     "זה המספר הנכון לחזרה אליכם?" ולחכות לאישור.
+
+- חשוב:
+  - אם נראה שהלקוח מתעקש שנחזור למספר המזוהה – לא לבקש ממנו שוב מספר אחר, אלא פשוט לאשר חוזרת למספר שממנו הוא מתקשר.
+  - לעולם לא להוסיף ספרות שלא נאמרו ולא להוריד ספרות שנאמרו.
 
 רוסית:
 - כאשר הלקוח מדבר ברוסית – לדבר ברוסית פשוטה, יומיומית, בלי מילים גבוהות או פורמליות מדי.
@@ -319,7 +328,7 @@ ${langsTxt}
 - סדר מומלץ:
   1. קודם: "איך אפשר לפנות אליכם? אפשר שם פרטי או מלא."
   2. אחרי שהתשובה מגיעה: לשאול אם יש שם עסק. אם אין – לציין "לא רלוונטי" בשדה שם העסק.
-  3. אחר כך: "מה מספר הטלפון שנוח לחזור אליכם אליו?" (לבקש ספרה-ספרה ולהקריא בחזרה במדויק).
+  3. אחר כך: לשאול לגבי מספר הטלפון כפי שמוגדר בסעיף "טלפונים – לוגיקה חדשה".
   4. לבסוף: לבקש במשפט אחד קצר מה סיבת הפנייה.
 - בסיום איסוף הפרטים:
   - לסכם בקצרה ללקוח את מה שנרשם ולוודא שזה נכון.
@@ -542,12 +551,14 @@ wss.on('connection', (connection, req) => {
   let lastMediaTs = Date.now();
   let idleCheckInterval = null;
   let idleWarningSent = false;
+  let idleHangupScheduled = false;
   let maxCallTimeout = null;
   let maxCallWarningTimeout = null;
   let pendingHangup = null;    // { reason, closingMessage, closingSent }
   let openAiReady = false;
   let twilioClosed = false;
   let openAiClosed = false;
+  let callEnded = false;
 
   // מצב דיבור של הבוט (לצורך barge-in)
   let botSpeaking = false;
@@ -693,7 +704,14 @@ wss.on('connection', (connection, req) => {
   // Helper: סיום שיחה מרוכז – ניתוק מיידי אחרי הסגיר
   // -----------------------------
   function endCall(reason, closingMessage) {
+    if (callEnded) {
+      logDebug(tag, `endCall called again (${reason}) – already ended.`);
+      return;
+    }
+    callEnded = true;
+
     logInfo(tag, `endCall called with reason="${reason}"`);
+    logInfo(tag, 'Final conversation log:', conversationLog);
 
     if (idleCheckInterval) clearInterval(idleCheckInterval);
     if (maxCallTimeout) clearTimeout(maxCallTimeout);
@@ -726,6 +744,8 @@ wss.on('connection', (connection, req) => {
   // ברגע שהסגיר נאמר ונגמר – ניתוק מיידי.
   // -----------------------------
   function scheduleEndCall(reason, closingMessage) {
+    if (callEnded) return;
+
     const msg = closingMessage || MB_CLOSING_SCRIPT;
 
     if (pendingHangup) {
@@ -822,7 +842,7 @@ wss.on('connection', (connection, req) => {
   // Helper: הודעת "אתם עדיין איתי?"
   // -----------------------------
   function sendIdleWarningIfNeeded() {
-    if (idleWarningSent) return;
+    if (idleWarningSent || callEnded) return;
     idleWarningSent = true;
 
     const text =
@@ -978,8 +998,8 @@ wss.on('connection', (connection, req) => {
   openAiWs.on('close', () => {
     openAiClosed = true;
     logInfo(tag, 'OpenAI WS closed.');
-    if (!twilioClosed) {
-      scheduleEndCall('openai_ws_closed', MB_CLOSING_SCRIPT);
+    if (!callEnded) {
+      endCall('openai_ws_closed', MB_CLOSING_SCRIPT);
     }
   });
 
@@ -989,8 +1009,8 @@ wss.on('connection', (connection, req) => {
       openAiClosed = true;
       openAiWs.close();
     }
-    if (!twilioClosed) {
-      scheduleEndCall('openai_ws_error', MB_CLOSING_SCRIPT);
+    if (!callEnded) {
+      endCall('openai_ws_error', MB_CLOSING_SCRIPT);
     }
   });
 
@@ -1025,10 +1045,11 @@ wss.on('connection', (connection, req) => {
         const now = Date.now();
         const sinceMedia = now - lastMediaTs;
 
-        if (!idleWarningSent && sinceMedia >= MB_IDLE_WARNING_MS) {
+        if (!idleWarningSent && sinceMedia >= MB_IDLE_WARNING_MS && !callEnded) {
           sendIdleWarningIfNeeded();
         }
-        if (sinceMedia >= MB_IDLE_HANGUP_MS) {
+        if (!idleHangupScheduled && sinceMedia >= MB_IDLE_HANGUP_MS && !callEnded) {
+          idleHangupScheduled = true;
           logInfo(tag, 'Idle timeout reached, scheduling endCall.');
           scheduleEndCall('idle_timeout', MB_CLOSING_SCRIPT);
         }
@@ -1074,10 +1095,11 @@ wss.on('connection', (connection, req) => {
       openAiWs.send(JSON.stringify(oaMsg));
     } else if (event === 'stop') {
       logInfo(tag, 'Twilio stream stopped.');
-      if (!twilioClosed) {
-        twilioClosed = true;
+      twilioClosed = true;
+      // בשלב הזה אין צורך בסגיר – השיחה כבר הסתיימה בצד Twilio, רק מנקים ושולחים וובהוק
+      if (!callEnded) {
+        endCall('twilio_stop', MB_CLOSING_SCRIPT);
       }
-      scheduleEndCall('twilio_stop', MB_CLOSING_SCRIPT);
     } else {
       // events אחרים (mark וכו') – מתעלמים
     }
@@ -1086,16 +1108,16 @@ wss.on('connection', (connection, req) => {
   connection.on('close', () => {
     twilioClosed = true;
     logInfo(tag, 'Twilio WS closed.');
-    if (!openAiClosed) {
-      scheduleEndCall('twilio_ws_closed', MB_CLOSING_SCRIPT);
+    if (!callEnded) {
+      endCall('twilio_ws_closed', MB_CLOSING_SCRIPT);
     }
   });
 
   connection.on('error', (err) => {
     twilioClosed = true;
     logError(tag, 'Twilio WS error', err);
-    if (!openAiClosed) {
-      scheduleEndCall('twilio_ws_error', MB_CLOSING_SCRIPT);
+    if (!callEnded) {
+      endCall('twilio_ws_error', MB_CLOSING_SCRIPT);
     }
   });
 });
