@@ -702,7 +702,8 @@ wss.on('connection', (connection, req) => {
         };
       }
 
-      if (!parsedLead.phone_number && callerNumber && conversationMentionsCallerId()) {
+      // ✅ אם השיחה מזכירה "מספר מזוהה" – תמיד נכריח את phone_number להיות המספר המזוהה
+      if (callerNumber && conversationMentionsCallerId()) {
         parsedLead.phone_number = callerNumber;
         parsedLead.notes =
           (parsedLead.notes || '') +
@@ -742,6 +743,11 @@ wss.on('connection', (connection, req) => {
         callerNumber: callerIdRaw,
         callerIdRaw,
         callerIdNormalized,
+        // ✅ חוק חדש:
+        // 1. phone_number – תמיד המספר "הנבחר" לחזרה (מזוהה או מספר אחר שנאמר)
+        // 2. CALLERID – תמיד המספר המזוהה מהשיחה (גם אם בחרו מספר אחר לחזרה)
+        phone_number: parsedLead.phone_number || null,
+        CALLERID: callerIdNormalized || callerIdRaw || null,
         botName: BOT_NAME,
         businessName: BUSINESS_NAME,
         startedAt: new Date(callStartTs).toISOString(),
@@ -772,7 +778,7 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: סיום שיחה מרוכז – ניתוק אחרי סגיר
+  // Helper: סיום שיחה מרוכז – ניתוק אחרי ಸגיר
   // -----------------------------
   function endCall(reason, closingMessage) {
     if (callEnded) {
