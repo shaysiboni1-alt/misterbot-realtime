@@ -798,12 +798,13 @@ wss.on('connection', (connection, req) => {
         parsedLead.business_name = 'לא רלוונטי';
       }
 
+      // ❗ לוגיקה חדשה: מבחינתך כל ליד אמיתי עם טלפון → וובהוק,
+      // לא משנה אם lead_type "new" / "existing" / "unknown".
       const isFullLead =
         parsedLead.is_lead === true &&
-        (parsedLead.lead_type === 'new' || parsedLead.lead_type === 'existing') &&
         !!parsedLead.phone_number;
 
-      // 👉 חוק: שולחים וובהוק רק אם זה "ליד מלא" (יש טלפון והוא באמת ליד).
+      // 👉 שולחים וובהוק רק אם זה "ליד מלא" (יש טלפון והוא באמת ליד).
       if (!isFullLead) {
         logInfo(tag, 'Parsed lead is NOT full lead – webhook will NOT be sent.', {
           is_lead: parsedLead.is_lead,
