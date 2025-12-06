@@ -730,7 +730,7 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: שליחת וובהוק לידים
+  // Helper: שליחת וובהוק לידים – פעם אחת בלבד, ורק אם זה ליד מלא
   // -----------------------------
   async function sendLeadWebhook(reason, closingMessage) {
     if (!MB_ENABLE_LEAD_CAPTURE || !MB_WEBHOOK_URL) {
@@ -755,16 +755,8 @@ wss.on('connection', (connection, req) => {
       let parsedLead = await extractLeadFromConversation(conversationLog);
 
       if (!parsedLead || typeof parsedLead !== 'object') {
-        logInfo(tag, 'No parsed lead object – sending fallback payload with caller only.');
-        parsedLead = {
-          is_lead: false,
-          lead_type: 'unknown',
-          full_name: null,
-          business_name: 'לא רלוונטי',
-          phone_number: null,
-          reason: null,
-          notes: null
-        };
+        logInfo(tag, 'No parsed lead object – skipping webhook (לא ליד מלא).');
+        return;
       }
 
       // כלל: אם אין טלפון מה-LLM – תמיד ננסה להשלים אותו מהמזוהה.
@@ -810,6 +802,16 @@ wss.on('connection', (connection, req) => {
         parsedLead.is_lead === true &&
         (parsedLead.lead_type === 'new' || parsedLead.lead_type === 'existing') &&
         !!parsedLead.phone_number;
+
+      // 👉 חוק: שולחים וובהוק רק אם זה "ליד מלא" (יש טלפון והוא באמת ליד).
+      if (!isFullLead) {
+        logInfo(tag, 'Parsed lead is NOT full lead – webhook will NOT be sent.', {
+          is_lead: parsedLead.is_lead,
+          lead_type: parsedLead.lead_type,
+          phone_number: parsedLead.phone_number
+        });
+        return;
+      }
 
       // phone_number = מספר לחזרה בפועל
       const finalPhoneNumber =
@@ -888,7 +890,7 @@ wss.on('connection', (connection, req) => {
     if (maxCallTimeout) clearTimeout(maxCallTimeout);
     if (maxCallWarningTimeout) clearTimeout(maxCallWarningTimeout);
 
-    // לא מחכים ל-webhook – שולחים בפייר אנד פורגט
+    // לא מחכים ל-webhook – שולחים בפייר אנד פורגט (אם יש ליד מלא)
     if (MB_ENABLE_LEAD_CAPTURE && MB_WEBHOOK_URL) {
       sendLeadWebhook(reason, closingMessage || MB_CLOSING_SCRIPT).catch((err) =>
         logError(tag, 'sendLeadWebhook fire-and-forget error', err)
@@ -902,7 +904,7 @@ wss.on('connection', (connection, req) => {
       );
     }
 
-    // ניתוק אקטיבי בטוויליו
+    // ניתוק אקטיבי בטוויליו (סיום שיחה פיזית)
     if (callSid) {
       hangupTwilioCall(callSid, tag).catch(() => {});
     }
