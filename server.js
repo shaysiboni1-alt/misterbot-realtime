@@ -521,6 +521,29 @@ wss.on('connection', (connection, req) => {
   // האם יש response פעיל במודל
   let hasActiveResponse = false;
 
+  // פתיח – שולחים רק אחרי שיש גם OpenAI מוכן וגם streamSid
+  const greetingText = MB_OPENING_SCRIPT;
+  let greetingSent = false;
+
+  function maybeSendGreeting() {
+    if (greetingSent) return;
+    if (!openAiReady) {
+      logDebug(tag, 'Greeting not sent yet – OpenAI not ready.');
+      return;
+    }
+    if (!streamSid) {
+      logDebug(tag, 'Greeting not sent yet – streamSid not set.');
+      return;
+    }
+
+    greetingSent = true;
+    logInfo(tag, 'Sending opening greeting via model.');
+    sendModelPrompt(
+      `פתחי את השיחה עם הלקוח במשפט הבא (אפשר לשנות מעט את הניסוח אבל לא להאריך): "${greetingText}" ואז עצרי והמתיני לתשובה שלו.`,
+      'opening_greeting'
+    );
+  }
+
   // -----------------------------
   // Helper: שליחת טקסט למודל עם הגנה על response כפול
   // -----------------------------
@@ -799,11 +822,8 @@ wss.on('connection', (connection, req) => {
     logDebug(tag, 'Sending session.update to OpenAI.', sessionUpdate);
     openAiWs.send(JSON.stringify(sessionUpdate));
 
-    const greetingText = MB_OPENING_SCRIPT;
-    sendModelPrompt(
-      `פתחי את השיחה עם הלקוח במשפט הבא (אפשר לשנות מעט את הניסוח אבל לא להאריך): "${greetingText}" ואז עצרי והמתיני לתשובה שלו.`,
-      'opening_greeting'
-    );
+    // הפתיח יישלח רק אחרי שגם Twilio שלח start ויש streamSid
+    maybeSendGreeting();
   });
 
   openAiWs.on('message', (data) => {
@@ -840,7 +860,12 @@ wss.on('connection', (connection, req) => {
 
       case 'response.output_audio.delta': {
         const b64 = msg.delta;
-        if (!b64 || !streamSid) break;
+        if (!b64) break;
+        if (!streamSid) {
+          // זה קורה אם המודל מחזיר אודיו לפני שקיבלנו start מטוויליו
+          logDebug(tag, 'Received audio delta before streamSid is set – skipping frame.');
+          break;
+        }
         botSpeaking = true;
         if (connection.readyState === WebSocket.OPEN) {
           const twilioMsg = {
@@ -848,6 +873,7 @@ wss.on('connection', (connection, req) => {
             streamSid,
             media: { payload: b64 }
           };
+          logDebug(tag, `Sending audio frame to Twilio. size=${b64.length}`);
           connection.send(JSON.stringify(twilioMsg));
         }
         break;
@@ -926,6 +952,9 @@ wss.on('connection', (connection, req) => {
         tag,
         `Twilio stream started. streamSid=${streamSid}, callSid=${callSid}, caller=${callerNumber}`
       );
+
+      // עכשיו שיש streamSid – אפשר לשלוח פתיח אם OpenAI כבר מוכן
+      maybeSendGreeting();
 
       // Idle checker
       idleCheckInterval = setInterval(() => {
