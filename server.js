@@ -702,13 +702,18 @@ wss.on('connection', (connection, req) => {
         };
       }
 
-      // אם אין טלפון מה-LLM ויש אזכור של מזוהה – נשלים ממספר המזוהה
-      if (!parsedLead.phone_number && callerNumber && conversationMentionsCallerId()) {
+      // כלל: אם אין טלפון מה-LLM – תמיד ננסה להשלים אותו מהמזוהה.
+      if (!parsedLead.phone_number && callerNumber) {
         parsedLead.phone_number = callerNumber;
+
+        const suffixNote = conversationMentionsCallerId()
+          ? 'הלקוח ביקש חזרה למספר המזוהה ממנו התקשר.'
+          : 'לא נמסר מספר טלפון מפורש בשיחה – נעשה שימוש במספר המזוהה מהמערכת.';
+
         parsedLead.notes =
           (parsedLead.notes || '') +
           (parsedLead.notes ? ' ' : '') +
-          'הלקוח ביקש חזרה למספר המזוהה ממנו התקשר.';
+          suffixNote;
       }
 
       // נורמליזציה של מספר הטלפון שנאסף
@@ -738,16 +743,13 @@ wss.on('connection', (connection, req) => {
         (parsedLead.lead_type === 'new' || parsedLead.lead_type === 'existing') &&
         !!parsedLead.phone_number;
 
-      // 🟢 לוגיקה לפי מה שביקשת:
-      // phone_number = מספר החזרה בפועל:
-      //   - אם הלקוחה נתנה מספר אחר → parsedLead.phone_number (normalized)
-      //   - אחרת → נשתמש במזוהה (normalized ואם אין אז RAW).
+      // phone_number = מספר לחזרה בפועל
       const finalPhoneNumber =
         parsedLead.phone_number ||
         callerIdNormalized ||
         callerIdRaw;
 
-      // CALLERID = תמיד המזוהה (מנורמל אם אפשר, אחרת RAW) – חוק ברזל.
+      // CALLERID = תמיד המזוהה
       const finalCallerId =
         callerIdNormalized ||
         callerIdRaw ||
@@ -760,7 +762,7 @@ wss.on('connection', (connection, req) => {
         callerIdRaw,
         callerIdNormalized,
 
-        // 👇 שני הפרמטרים שביקשת במפורש:
+        // שני הפרמטרים שביקשת במפורש:
         phone_number: finalPhoneNumber,
         CALLERID: finalCallerId,
 
@@ -846,7 +848,7 @@ wss.on('connection', (connection, req) => {
 
   // -----------------------------
   // Helper: תזמון סיום שיחה אחרי סגיר – חוק ברזל:
-  // אומרים סגיר קצר, ואחרי כמה שניות מנתקים בכל מקרה.
+  // אומרים סגיר קצר, וברגע שהוא נגמר – ניתוק. הטיימר נשאר רק כ-fallback.
   // -----------------------------
   function scheduleEndCall(reason, closingMessage) {
     if (callEnded) return;
@@ -858,7 +860,6 @@ wss.on('connection', (connection, req) => {
       return;
     }
 
-    // שומרים מה הסיבה ומה משפט הסגירה לשימוש ב-endCall
     pendingHangup = { reason, closingMessage: msg };
 
     // שולחים לבוט לומר את משפט הסגירה (אם אפשר)
@@ -868,6 +869,12 @@ wss.on('connection', (connection, req) => {
         'closing'
       );
       logInfo(tag, `Closing message sent to model: ${msg}`);
+    } else {
+      // אם אין חיבור למודל – מנתקים מיד בלי לחכות
+      const ph = pendingHangup;
+      pendingHangup = null;
+      endCall(ph.reason, ph.closingMessage);
+      return;
     }
 
     const rawGrace =
@@ -876,9 +883,10 @@ wss.on('connection', (connection, req) => {
     // לא מאפשרים ערכים קיצוניים – תמיד בין 2 ל-8 שניות
     const graceMs = Math.max(2000, Math.min(rawGrace, 8000));
 
+    // fallback: אם משום מה לא קיבלנו response.audio.done / response.completed
     setTimeout(() => {
-      if (callEnded) return;
-      const ph = pendingHangup || { reason, closingMessage: msg };
+      if (callEnded || !pendingHangup) return;
+      const ph = pendingHangup;
       pendingHangup = null;
       logInfo(tag, `Hangup grace reached (${graceMs} ms), forcing endCall.`);
       endCall(ph.reason, ph.closingMessage);
@@ -886,7 +894,7 @@ wss.on('connection', (connection, req) => {
 
     logInfo(
       tag,
-      `scheduleEndCall: hangup scheduled in ${graceMs} ms with reason="${reason}".`
+      `scheduleEndCall: hangup scheduled (with fallback in ${graceMs} ms) with reason="${reason}".`
     );
   }
 
@@ -1054,14 +1062,27 @@ wss.on('connection', (connection, req) => {
       }
 
       case 'response.audio.done': {
-        // האודיו הסתיים, אבל ה-Response עדיין פעיל עד response.completed
+        // האודיו הסתיים – אם זה היה משפט סגירה, מנתקים מיד.
         botSpeaking = false;
+        if (pendingHangup && !callEnded) {
+          const ph = pendingHangup;
+          pendingHangup = null;
+          logInfo(tag, 'Closing audio finished, ending call now.');
+          endCall(ph.reason, ph.closingMessage);
+        }
         break;
       }
 
       case 'response.completed': {
         botSpeaking = false;
         hasActiveResponse = false;
+        // במקרה שאין כלל אודיו (למשל טקסט בלבד) – נסיים גם כאן אם יש pendingHangup
+        if (pendingHangup && !callEnded) {
+          const ph = pendingHangup;
+          pendingHangup = null;
+          logInfo(tag, 'Response completed for closing, ending call now.');
+          endCall(ph.reason, ph.closingMessage);
+        }
         break;
       }
 
