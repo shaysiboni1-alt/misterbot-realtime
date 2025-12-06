@@ -97,8 +97,8 @@ const MB_IDLE_HANGUP_MS = envNumber('MB_IDLE_HANGUP_MS', 90000);  // 90 שניו
 // מגבלת זמן שיחה – ברירת מחדל 5 דקות
 const MB_MAX_CALL_MS = envNumber('MB_MAX_CALL_MS', 5 * 60 * 1000);
 const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000); // 45 שניות לפני הסוף
-// נשאיר את הפרמטר אבל לא נשתמש בו בפועל לנטע (הניתוק מיידי אחרי הסגיר)
-const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 8000);
+// כאן כן נשתמש – כמה זמן אחרי הסגיר לנתק בכוח
+const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 5000);
 
 // האם מותר ללקוח לקטוע את הבוט (barge-in)
 const MB_ALLOW_BARGE_IN = envBool('MB_ALLOW_BARGE_IN', false);
@@ -284,7 +284,7 @@ ${langsTxt}
 טלפונים – לוגיקה חדשה:
 - כאשר מגיעים לשלב של לקיחת טלפון, תמיד להתחיל בשאלה המדויקת הבאה או ניסוח כמעט זהה:
   "נוח שיחזרו אליכם למספר שממנו אתם מתקשרים עכשיו, או למספר אחר?"
-  אסור לשאול סתם "מה מספר הטלפון".
+  אסור בשום אופן לקפוץ ישר לשאלה "מה מספר הטלפון שלכם".
 - אם הלקוח אומר משהו בסגנון:
   "כן, תחזרו למספר שממנו התקשרתי", "כן, למספר המזוהה", "לאותו מספר" וכדומה:
   - לא לבקש מספר.
@@ -356,7 +356,7 @@ ${langsTxt}
   "טוב תודה", "טוב תודה, זהו", "בסדר תודה", "שיהיה יום טוב", "לילה טוב", "שבוע טוב",
   "goodbye", "bye", "ok thanks" וכדומה –
   להבין שזאת סיום שיחה.
-- במקרה כזה – לתת משפט סיום קצר וחיובי, ולהיפרד בעדינות. מיד אחרי משפט הסיום – השיחה נחתכת בצדכם.
+- במקרה כזה – לתת משפט סיום קצר וחיובי, ולהיפרד בעדינות. מיד אחרי משפט הסיום – השיחה נחתכת בצדכם (בפועל: אומרים סגיר אחד קצר, ומיד לאחריו המערכת ניתקת את השיחה).
 
 ${businessKb}
 
@@ -601,7 +601,7 @@ wss.on('connection', (connection, req) => {
   let idleHangupScheduled = false;
   let maxCallTimeout = null;
   let maxCallWarningTimeout = null;
-  let pendingHangup = null;    // { reason, closingMessage, closingSent }
+  let pendingHangup = null;    // { reason, closingMessage }
   let openAiReady = false;
   let twilioClosed = false;
   let openAiClosed = false;
@@ -748,7 +748,7 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: סיום שיחה מרוכז – ניתוק מיידי אחרי הסגיר
+  // Helper: סיום שיחה מרוכז – ניתוק אחרי סגיר
   // -----------------------------
   function endCall(reason, closingMessage) {
     if (callEnded) {
@@ -793,7 +793,7 @@ wss.on('connection', (connection, req) => {
 
   // -----------------------------
   // Helper: תזמון סיום שיחה אחרי סגיר – חוק ברזל:
-  // ברגע שהסגיר נאמר ונגמר – ניתוק מיידי.
+  // אומרים סגיר קצר, ואחרי כמה שניות מנתקים בכל מקרה.
   // -----------------------------
   function scheduleEndCall(reason, closingMessage) {
     if (callEnded) return;
@@ -805,35 +805,32 @@ wss.on('connection', (connection, req) => {
       return;
     }
 
-    // מסמנים שיש בקשת ניתוק
-    pendingHangup = {
-      reason,
-      closingMessage: msg,
-      closingSent: false
-    };
+    pendingHangup = { reason, closingMessage: msg };
 
-    if (openAiWs.readyState !== WebSocket.OPEN) {
-      // אין חיבור – ניתוק מיידי
-      endCall(reason, msg);
-      return;
-    }
-
-    // אם אין כרגע response פעיל – שולחים מיד סגיר
-    if (!hasActiveResponse) {
-      const text = pendingHangup.closingMessage || MB_CLOSING_SCRIPT;
+    // שולחים לבוט לומר את משפט הסגירה (אם אפשר)
+    if (openAiWs.readyState === WebSocket.OPEN) {
       sendModelPrompt(
-        `סיימי את השיחה עם הלקוח במשפט הבא בלבד, בלי להוסיף משפטים נוספים: "${text}"`,
+        `סיימי את השיחה עם הלקוח במשפט הבא בלבד, בלי להוסיף שום משפט נוסף: "${msg}"`,
         'closing'
       );
-      pendingHangup.closingSent = true;
-      logInfo(tag, `Scheduled hangup with closing message (immediate): ${text}`);
-    } else {
-      // יש response פעיל – נחכה שיסתיים, ואז ב-response.completed נשלח סגיר
-      logDebug(
-        tag,
-        'scheduleEndCall: model has active response, will send closing after response.completed.'
-      );
+      logInfo(tag, `Closing message sent to model: ${msg}`);
     }
+
+    const graceMs =
+      MB_HANGUP_GRACE_MS && MB_HANGUP_GRACE_MS > 0 ? MB_HANGUP_GRACE_MS : 5000;
+
+    setTimeout(() => {
+      if (callEnded) return;
+      const ph = pendingHangup || { reason, closingMessage: msg };
+      pendingHangup = null;
+      logInfo(tag, `Hangup grace reached (${graceMs} ms), forcing endCall.`);
+      endCall(ph.reason, ph.closingMessage);
+    }, graceMs);
+
+    logInfo(
+      tag,
+      `scheduleEndCall: hangup scheduled in ${graceMs} ms with reason="${reason}".`
+    );
   }
 
   // -----------------------------
@@ -1008,29 +1005,6 @@ wss.on('connection', (connection, req) => {
       case 'response.completed': {
         botSpeaking = false;
         hasActiveResponse = false;
-
-        // אם יש ניתוק מתוכנן:
-        if (pendingHangup) {
-          if (!pendingHangup.closingSent && openAiWs.readyState === WebSocket.OPEN) {
-            // response רגיל הסתיים – עכשיו שולחים את הסגיר
-            const text =
-              pendingHangup.closingMessage || MB_CLOSING_SCRIPT;
-            sendModelPrompt(
-              `סיימי את השיחה עם הלקוח במשפט הבא בלבד, בלי להוסיף משפטים נוספים: "${text}"`,
-              'closing_after_previous'
-            );
-            pendingHangup.closingSent = true;
-            logInfo(
-              tag,
-              `Sending closing message after previous response completed: ${text}`
-            );
-          } else {
-            // זה ה-response.completed של הסגיר עצמו – ניתוק מיידי (חוק ברזל)
-            const { reason, closingMessage } = pendingHangup;
-            pendingHangup = null;
-            endCall(reason, closingMessage);
-          }
-        }
         break;
       }
 
