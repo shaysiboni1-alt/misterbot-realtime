@@ -3,6 +3,7 @@
 // MisterBot Realtime Voice Bot – "נטע"
 // Twilio Media Streams <-> OpenAI Realtime API (gpt-4o-realtime-preview-2024-12-17)
 //
+//
 // חוקים עיקריים לפי ה-MASTER PROMPT:
 // - שיחה בעברית כברירת מחדל, לשון רבים, טון חם וקצר.
 // - שליטה מלאה דרך ENV (פתיח, סגיר, פרומפט כללי, KB עסקי, טיימרים, לידים, VAD).
@@ -118,14 +119,36 @@ const MB_DEBUG = envBool('MB_DEBUG', false);
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || '';
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
 
+console.log(`[CONFIG] MB_HANGUP_GRACE_MS=${MB_HANGUP_GRACE_MS} ms`);
+
 // -----------------------------
 // Dynamic KB from Google Drive
 // -----------------------------
 const MB_DYNAMIC_KB_URL = process.env.MB_DYNAMIC_KB_URL || '';
 let dynamicBusinessPrompt = '';
 
+// זמן מינימלי בין ריענונים (ל-Throttling אחרי שיחות)
+let lastDynamicKbRefreshAt = 0;
+const MB_DYNAMIC_KB_MIN_INTERVAL_MS = envNumber(
+  'MB_DYNAMIC_KB_MIN_INTERVAL_MS',
+  5 * 60 * 1000 // ברירת מחדל: לא יותר מפעם ב-5 דקות
+);
+
 async function refreshDynamicBusinessPrompt(tag = 'DynamicKB') {
-  if (!MB_DYNAMIC_KB_URL) return;
+  if (!MB_DYNAMIC_KB_URL) {
+    if (MB_DEBUG) {
+      console.log(`[DEBUG][${tag}] MB_DYNAMIC_KB_URL is empty – skip refresh.`);
+    }
+    return;
+  }
+
+  const now = Date.now();
+  if (tag !== 'Startup' && now - lastDynamicKbRefreshAt < MB_DYNAMIC_KB_MIN_INTERVAL_MS) {
+    console.log(
+      `[INFO][${tag}] Skipping dynamic KB refresh – refreshed ${(now - lastDynamicKbRefreshAt)} ms ago (min interval ${MB_DYNAMIC_KB_MIN_INTERVAL_MS} ms).`
+    );
+    return;
+  }
 
   try {
     const res = await fetch(MB_DYNAMIC_KB_URL);
@@ -135,6 +158,7 @@ async function refreshDynamicBusinessPrompt(tag = 'DynamicKB') {
     }
     const text = (await res.text()).trim();
     dynamicBusinessPrompt = text;
+    lastDynamicKbRefreshAt = Date.now();
     console.log(`[INFO][${tag}] Dynamic KB loaded. length=${text.length}`);
   } catch (err) {
     console.error(`[ERROR][${tag}] Error fetching dynamic KB`, err);
@@ -310,7 +334,7 @@ ${langsTxt}
      "זה המספר הנכון לחזרה אליכם?" ולחכות לאישור.
 
 - חשוב:
-  - אם נראה שהלקוח מתעקש שנחזור למספר המזוהה – לא לבקש ממנו שוב מספר אחר, אלא פשוט לאשר חוזרת למספר שממנו הוא מתקשר.
+  - אם נראה שהלקוח מתעקש שנחזור למספר המזוהה – לא לבקש ממנו שוב מספר אחר, אלא פשוט לאשר חזרה למספר שממנו הוא מתקשר.
   - לעולם לא להוסיף ספרות שלא נאמרו ולא להוריד ספרות שנאמרו.
 
 רוסית:
@@ -356,7 +380,7 @@ ${langsTxt}
   "טוב תודה", "טוב תודה, זהו", "בסדר תודה", "שיהיה יום טוב", "לילה טוב", "שבוע טוב",
   "goodbye", "bye", "ok thanks" וכדומה –
   להבין שזאת סיום שיחה.
-- במקרה כזה – לתת משפט סיום קצר וחיובי, ולהיפרד בעדינות. מיד אחרי משפט הסיום – השיחה נחתכת בצדכם (בפועל: אומרים סגיר אחד קצר, ומיד לאחריו המערכת ניתקת את השיחה).
+- במקרה כזה – לתת משפט סיום קצר וחיובי, ולהיפרד בעדינות. בפועל: אומרים סגיר אחד קצר, ומיד לאחריו המערכת ניתקת את השיחה בצד שלכם.
 
 ${businessKb}
 
@@ -771,6 +795,13 @@ wss.on('connection', (connection, req) => {
       );
     }
 
+    // 🔄 ריענון KB דינאמי אחרי סיום שיחה (בפייר-אנד-פורגט, עם Throttling)
+    if (MB_DYNAMIC_KB_URL) {
+      refreshDynamicBusinessPrompt('PostCall').catch((err) =>
+        logError(tag, 'DynamicKB post-call refresh failed', err)
+      );
+    }
+
     // ניתוק אקטיבי בטוויליו
     if (callSid) {
       hangupTwilioCall(callSid, tag).catch(() => {});
@@ -805,6 +836,7 @@ wss.on('connection', (connection, req) => {
       return;
     }
 
+    // שומרים מה הסיבה ומה משפט הסגירה לשימוש ב-endCall
     pendingHangup = { reason, closingMessage: msg };
 
     // שולחים לבוט לומר את משפט הסגירה (אם אפשר)
@@ -816,8 +848,11 @@ wss.on('connection', (connection, req) => {
       logInfo(tag, `Closing message sent to model: ${msg}`);
     }
 
-    const graceMs =
-      MB_HANGUP_GRACE_MS && MB_HANGUP_GRACE_MS > 0 ? MB_HANGUP_GRACE_MS : 5000;
+    const rawGrace =
+      MB_HANGUP_GRACE_MS && MB_HANGUP_GRACE_MS > 0 ? MB_HANGUP_GRACE_MS : 3000;
+
+    // לא מאפשרים ערכים קיצוניים – תמיד בין 2 ל-8 שניות
+    const graceMs = Math.max(2000, Math.min(rawGrace, 8000));
 
     setTimeout(() => {
       if (callEnded) return;
@@ -1161,14 +1196,9 @@ wss.on('connection', (connection, req) => {
 // -----------------------------
 server.listen(PORT, () => {
   console.log(`✅ MisterBot Realtime Voice Bot running on port ${PORT}`);
+  // ריענון KB דינאמי פעם אחת בהפעלה
   refreshDynamicBusinessPrompt('Startup').catch((err) =>
     console.error('[ERROR][DynamicKB] initial load failed', err)
   );
-  // ריענון KB דינאמי כל 5 דקות
-  if (MB_DYNAMIC_KB_URL) {
-    setInterval(
-      () => refreshDynamicBusinessPrompt('Interval').catch(() => {}),
-      5 * 60 * 1000
-    );
-  }
+  // ❌ אין יותר setInterval – מעכשיו ריענון KB קורה רק אחרי שיחות (PostCall + Throttling)
 });
