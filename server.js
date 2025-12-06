@@ -302,7 +302,7 @@ ${langsTxt}
 - בסביבה רועשת (רכב, אנשים מדברים) – אם אינכם בטוחים במה שנאמר, אל תענו תשובה מיידית. בקשו מהלקוח לחזור שוב לאט ובברור במקום להמציא תשובה.
 
 פתיחת שיחה:
-- בפתיחת השיחה, אחרי הברכה והצגה עצמית, לשאול בקצרה "איך אפשר לעזור לכם היום?" או ניסוח דומה.
+- בפתיחת שיחה, אחרי הברכה והצגה עצמית, לשאול בקצרה "איך אפשר לעזור לכם היום?" או ניסוח דומה.
 - אחרי השאלה הזאת – לעצור ולחכות שהלקוח ידבר. לא לתת הסברים נוספים, לא להמשיך לדבר ולא לענות לעצמכם לפני שהלקוח הגיב בפעם הראשונה.
 
 טלפונים – לוגיקה חדשה:
@@ -779,8 +779,11 @@ wss.on('connection', (connection, req) => {
       );
       parsedLead.phone_number = normalizedPhone;
 
-      const callerIdRaw = callerNumber || null;
-      const callerIdNormalized = normalizePhoneNumber(null, callerNumber);
+      // חשוב: גם caller_id_raw וגם CALLERID יהיו בלי +972, בפורמט 0XXXXXXXXX/0XXXXXXXX
+      const callerDigits = normalizePhoneNumber(null, callerNumber);
+
+      const callerIdRaw = callerDigits || (callerNumber ? String(callerNumber).replace(/\D/g, '') : null);
+      const callerIdNormalized = callerDigits || callerIdRaw;
 
       parsedLead.caller_id_raw = callerIdRaw;
       parsedLead.caller_id_normalized = callerIdNormalized;
@@ -805,7 +808,7 @@ wss.on('connection', (connection, req) => {
         callerIdNormalized ||
         callerIdRaw;
 
-      // CALLERID = תמיד המזוהה (לפחות גולמי)
+      // CALLERID = תמיד המזוהה בפורמט ישראלי (ללא +972)
       const finalCallerId =
         callerIdNormalized ||
         callerIdRaw ||
@@ -835,6 +838,11 @@ wss.on('connection', (connection, req) => {
       };
 
       logInfo(tag, `Sending lead webhook to ${MB_WEBHOOK_URL}`);
+      logInfo(tag, 'Lead webhook short summary', {
+        phone_number: finalPhoneNumber,
+        CALLERID: finalCallerId
+      });
+
       const res = await fetch(MB_WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -915,6 +923,7 @@ wss.on('connection', (connection, req) => {
       return;
     }
 
+    logInfo(tag, `scheduleEndCall invoked. reason="${reason}", closingMessage="${msg}"`);
     pendingHangup = { reason, closingMessage: msg };
 
     // שולחים לבוט לומר את משפט הסגירה (אם אפשר)
