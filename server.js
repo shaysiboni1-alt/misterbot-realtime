@@ -1261,8 +1261,12 @@ wss.on('connection', (connection, req) => {
 
       if (!openAiReady || openAiWs.readyState !== WebSocket.OPEN) return;
 
-      if (!MB_ALLOW_BARGE_IN && botSpeaking) {
-        // חוק ברזל – לא מאפשרים ללקוח לקטוע את הבוט
+      // 🔒 חוק barge-in:
+      // MB_ALLOW_BARGE_IN = false  → נטע *לא* מקשיבה בכלל בזמן שיש לה תור פעיל (response)
+      // כולל כל זמן שיש אודיו יוצא או שהמודל עדיין באמצע תשובה.
+      const isBotTurn = hasActiveResponse || botSpeaking;
+      if (!MB_ALLOW_BARGE_IN && isBotTurn) {
+        // כשאסור barge-in – מתעלמים מכל אודיו שמגיע בזמן תור של הבוט.
         return;
       }
 
