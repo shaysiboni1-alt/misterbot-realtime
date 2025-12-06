@@ -97,7 +97,7 @@ const MB_IDLE_HANGUP_MS = envNumber('MB_IDLE_HANGUP_MS', 90000);  // 90 שניו
 // מגבלת זמן שיחה – ברירת מחדל 5 דקות
 const MB_MAX_CALL_MS = envNumber('MB_MAX_CALL_MS', 5 * 60 * 1000);
 const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000); // 45 שניות לפני הסוף
-const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 8000); // זמן חסד לפני ניתוק אחרי סגיר
+const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 8000); // לא ישמש בפועל יותר לנטע
 
 // האם מותר ללקוח לקטוע את הבוט (barge-in)
 const MB_ALLOW_BARGE_IN = envBool('MB_ALLOW_BARGE_IN', false);
@@ -545,7 +545,6 @@ wss.on('connection', (connection, req) => {
   let maxCallTimeout = null;
   let maxCallWarningTimeout = null;
   let pendingHangup = null;    // { reason, closingMessage, closingSent }
-  let hangupGraceTimeout = null;
   let openAiReady = false;
   let twilioClosed = false;
   let openAiClosed = false;
@@ -688,7 +687,6 @@ wss.on('connection', (connection, req) => {
     if (idleCheckInterval) clearInterval(idleCheckInterval);
     if (maxCallTimeout) clearTimeout(maxCallTimeout);
     if (maxCallWarningTimeout) clearTimeout(maxCallWarningTimeout);
-    if (hangupGraceTimeout) clearTimeout(hangupGraceTimeout);
 
     await sendLeadWebhook(reason, closingMessage || MB_CLOSING_SCRIPT);
 
@@ -707,7 +705,8 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: תזמון סיום שיחה אחרי סגיר
+  // Helper: תזמון סיום שיחה אחרי סגיר – חוק ברזל:
+  // ברגע שהסגיר נאמר ונגמר – ניתוק מיידי.
   // -----------------------------
   function scheduleEndCall(reason, closingMessage) {
     const msg = closingMessage || MB_CLOSING_SCRIPT;
@@ -717,7 +716,7 @@ wss.on('connection', (connection, req) => {
       return;
     }
 
-    // תמיד נסמן שיש בקשת ניתוק
+    // מסמנים שיש בקשת ניתוק
     pendingHangup = {
       reason,
       closingMessage: msg,
@@ -725,12 +724,12 @@ wss.on('connection', (connection, req) => {
     };
 
     if (openAiWs.readyState !== WebSocket.OPEN) {
-      // אין חיבור – מסיימים מיד
+      // אין חיבור – ניתוק מיידי
       endCall(reason, msg);
       return;
     }
 
-    // אם אין כרגע response פעיל – אפשר לשלוח סגיר מיד
+    // אם אין כרגע response פעיל – שולחים מיד סגיר
     if (!hasActiveResponse) {
       const text = pendingHangup.closingMessage || MB_CLOSING_SCRIPT;
       sendModelPrompt(
@@ -740,26 +739,11 @@ wss.on('connection', (connection, req) => {
       pendingHangup.closingSent = true;
       logInfo(tag, `Scheduled hangup with closing message (immediate): ${text}`);
     } else {
-      // יש response פעיל – נחכה ל-response.completed ואז נשלח סגיר
+      // יש response פעיל – נחכה שיסתיים, ואז ב-response.completed נשלח סגיר
       logDebug(
         tag,
-        'scheduleEndCall: model currently has active response, will send closing after response.completed.'
+        'scheduleEndCall: model has active response, will send closing after response.completed.'
       );
-    }
-
-    // טיימר חסד – בכל מקרה
-    if (!hangupGraceTimeout && MB_HANGUP_GRACE_MS > 0) {
-      hangupGraceTimeout = setTimeout(() => {
-        if (pendingHangup) {
-          const { reason: r, closingMessage: cm } = pendingHangup;
-          logInfo(
-            tag,
-            `Hangup grace timeout reached (${MB_HANGUP_GRACE_MS} ms), forcing endCall.`
-          );
-          pendingHangup = null;
-          endCall(r, cm);
-        }
-      }, MB_HANGUP_GRACE_MS);
     }
   }
 
@@ -920,7 +904,7 @@ wss.on('connection', (connection, req) => {
       }
 
       case 'response.audio.done': {
-        // הסתיים האודיו, אבל ה-Response עדיין נחשב פעיל עד response.completed
+        // האודיו הסתיים, אבל ה-Response עדיין פעיל עד response.completed
         botSpeaking = false;
         break;
       }
@@ -945,7 +929,7 @@ wss.on('connection', (connection, req) => {
               `Sending closing message after previous response completed: ${text}`
             );
           } else {
-            // גם הסגיר כבר הסתיים – עכשיו אפשר באמת לנתק
+            // זה ה-response.completed של הסגיר עצמו – ניתוק מיידי (חוק ברזל)
             const { reason, closingMessage } = pendingHangup;
             pendingHangup = null;
             endCall(reason, closingMessage);
