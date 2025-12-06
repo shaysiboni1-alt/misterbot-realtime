@@ -361,6 +361,7 @@ ${langsTxt}
   4. לבסוף: לבקש במשפט אחד קצר מה סיבת הפנייה.
 - בסיום איסוף הפרטים:
   - לסכם בקצרה ללקוח את מה שנרשם ולוודא שזה נכון.
+  - לא לסכם ולא "לשלוח" שוב ושוב את אותם הפרטים – רק סיכום אחד מרוכז בסוף, אחרי שכל הפרטים (שם, טלפון, שם עסק אם יש, וסיבת פנייה) נקלטו במלואם. אם הלקוח משנה פרטים (שם, עסק, מספר) – תמיד להתייחס לגרסה האחרונה שאמר.
   - אחרי הסיכום תמיד לשאול: "יש עוד משהו שתרצו לשאול או לבדוק?".
   - אם הלקוח עונה "לא", "לא תודה", "זהו", "זה הכל" וכדומה – לסיים במשפט סיום קצר ומכבד ולהיפרד.
 
@@ -479,7 +480,7 @@ async function extractLeadFromConversation(conversationLog) {
 - "business_name": אם הלקוח מזכיר שם עסק – כתוב כפי שנשמע. אם שם העסק נאמר בעברית, כתוב אותו באותיות עבריות ולא באנגלית. אחרת null.
 - "phone_number": אם בשיחה מופיע מספר טלפון של הלקוח – החזר אותו כרצף ספרות בלבד, בלי רווחים ובלי +972 ובלי להוריד 0 בהתחלה.
   אם נשמעים כמה מספרים – בחר את המספר הרלוונטי ביותר ליצירת קשר, אחרת null.
-  אל תוסיף ספרות שלא נאמרו, ואל תנחש מספר אם לא ברור.
+  אל תוסף ספרות שלא נאמרו, ואל תנחש מספר אם לא ברור.
   אם המספר שנשמע אינו באורך 10 ספרות או 9 ספרות, או שאינו מתחיל בקידומת תקינה – עדיף להחזיר phone_number: null.
 - "reason": תיאור קצר וקולע בעברית של סיבת הפנייה (משפט אחד קצר).
 - "notes": כל דבר נוסף שיכול להיות רלוונטי לאיש מכירות / שירות (למשל: "מעוניין בדמו לבוט קולי", "פנייה דחופה", "שאל על מחירים" וכו').
@@ -685,6 +686,9 @@ wss.on('connection', (connection, req) => {
   // האם יש response פעיל במודל
   let hasActiveResponse = false;
 
+  // האם וובהוק לידים כבר נשלח בשיחה הזו
+  let leadWebhookSent = false;
+
   // -----------------------------
   // Helper: שליחת טקסט למודל עם הגנה על response כפול
   // -----------------------------
@@ -731,6 +735,11 @@ wss.on('connection', (connection, req) => {
   async function sendLeadWebhook(reason, closingMessage) {
     if (!MB_ENABLE_LEAD_CAPTURE || !MB_WEBHOOK_URL) {
       logDebug(tag, 'Lead capture disabled or no MB_WEBHOOK_URL – skipping webhook.');
+      return;
+    }
+
+    if (leadWebhookSent) {
+      logDebug(tag, 'Lead webhook already sent for this call – skipping.');
       return;
     }
 
@@ -842,6 +851,9 @@ wss.on('connection', (connection, req) => {
         phone_number: finalPhoneNumber,
         CALLERID: finalCallerId
       });
+
+      // חוק: פעם אחת בלבד לכל שיחה – גם אם הלקוח משנה פרטים, הפרשנות תמיד לפי השיחה המלאה עד לרגע הסיום.
+      leadWebhookSent = true;
 
       const res = await fetch(MB_WEBHOOK_URL, {
         method: 'POST',
