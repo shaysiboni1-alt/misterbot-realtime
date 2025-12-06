@@ -114,6 +114,10 @@ const MB_LEAD_PARSING_MODEL = process.env.MB_LEAD_PARSING_MODEL || 'gpt-4.1-mini
 // Debug
 const MB_DEBUG = envBool('MB_DEBUG', false);
 
+// Twilio credentials לניתוק אקטיבי
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || '';
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
+
 // -----------------------------
 // Dynamic KB from Google Drive
 // -----------------------------
@@ -278,15 +282,16 @@ ${langsTxt}
 - אחרי השאלה הזאת – לעצור ולחכות שהלקוח ידבר. לא לתת הסברים נוספים, לא להמשיך לדבר ולא לענות לעצמכם לפני שהלקוח הגיב בפעם הראשונה.
 
 טלפונים – לוגיקה חדשה:
-- כאשר מגיעים לשלב של לקיחת טלפון, תמיד להתחיל בשאלה:
+- כאשר מגיעים לשלב של לקיחת טלפון, תמיד להתחיל בשאלה המדויקת הבאה או ניסוח כמעט זהה:
   "נוח שיחזרו אליכם למספר שממנו אתם מתקשרים עכשיו, או למספר אחר?"
+  אסור לשאול סתם "מה מספר הטלפון".
 - אם הלקוח אומר משהו בסגנון:
   "כן, תחזרו למספר שממנו התקשרתי", "כן, למספר המזוהה", "לאותו מספר" וכדומה:
   - לא לבקש מספר.
   - לא להקריא מספר בקול.
   - לומר משהו קצר כמו:
     "מעולה, רשמתי שנחזור אליכם למספר שממנו אתם מתקשרים כעת."
-  - בשדות הליד, זה ייחשב כבקשה לחזרה למספר המזוהה.
+  - בשדות הליד, זה ייחשב כבקשה לחזרה למספר המזוהה בלבד.
 - אם הלקוח אומר "למספר אחר" או "לא, יש מספר אחר" וכדומה:
   1. לשאול: "לאיזה מספר נוח לחזור אליכם? תגידו לי ספרה-ספרה, לאט ובקול ברור."
   2. להקשיב למספר כאל רצף ספרות בלבד.
@@ -328,7 +333,7 @@ ${langsTxt}
 - סדר מומלץ:
   1. קודם: "איך אפשר לפנות אליכם? אפשר שם פרטי או מלא."
   2. אחרי שהתשובה מגיעה: לשאול אם יש שם עסק. אם אין – לציין "לא רלוונטי" בשדה שם העסק.
-  3. אחר כך: לשאול לגבי מספר הטלפון כפי שמוגדר בסעיף "טלפונים – לוגיקה חדשה".
+  3. אחר כך: לשאול לגבי מספר הטלפון בדיוק לפי סעיף "טלפונים – לוגיקה חדשה".
   4. לבסוף: לבקש במשפט אחד קצר מה סיבת הפנייה.
 - בסיום איסוף הפרטים:
   - לסכם בקצרה ללקוח את מה שנרשם ולוודא שזה נכון.
@@ -351,7 +356,7 @@ ${langsTxt}
   "טוב תודה", "טוב תודה, זהו", "בסדר תודה", "שיהיה יום טוב", "לילה טוב", "שבוע טוב",
   "goodbye", "bye", "ok thanks" וכדומה –
   להבין שזאת סיום שיחה.
-- במקרה כזה – לתת משפט סיום קצר וחיובי, ולהיפרד בעדינות. מיד אחרי משפט הסיום – ניתוק השיחה.
+- במקרה כזה – לתת משפט סיום קצר וחיובי, ולהיפרד בעדינות. מיד אחרי משפט הסיום – השיחה נחתכת בצדכם.
 
 ${businessKb}
 
@@ -514,6 +519,48 @@ ${conversationText}
   } catch (err) {
     logError(tag, 'Error in extractLeadFromConversation', err);
     return null;
+  }
+}
+
+// -----------------------------
+// Helper – ניתוק אקטיבי בטוויליו
+// -----------------------------
+async function hangupTwilioCall(callSid, tag = 'Call') {
+  if (!callSid) {
+    logDebug(tag, 'No callSid – skipping Twilio hangup.');
+    return;
+  }
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
+    logDebug(
+      tag,
+      'TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN missing – cannot hang up via Twilio API.'
+    );
+    return;
+  }
+
+  try {
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}.json`;
+    const body = new URLSearchParams({ Status: 'completed' });
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization:
+          'Basic ' +
+          Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64'),
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      logError(tag, `Twilio hangup HTTP ${res.status}`, txt);
+    } else {
+      logInfo(tag, 'Twilio call hangup requested successfully.');
+    }
+  } catch (err) {
+    logError(tag, 'Error calling Twilio hangup API', err);
   }
 }
 
@@ -724,7 +771,12 @@ wss.on('connection', (connection, req) => {
       );
     }
 
-    // קודם כל סוגרים OpenAI ו-Twilio – כדי שהלקוח יתנתק מיד
+    // ניתוק אקטיבי בטוויליו
+    if (callSid) {
+      hangupTwilioCall(callSid, tag).catch(() => {});
+    }
+
+    // סוגרים OpenAI ו-Twilio WS
     if (!openAiClosed && openAiWs.readyState === WebSocket.OPEN) {
       openAiClosed = true;
       openAiWs.close();
@@ -915,7 +967,14 @@ wss.on('connection', (connection, req) => {
         break;
       }
 
-      case 'response.output_text.done': {
+      case 'response.audio_transcript.delta': {
+        const delta = msg.delta || '';
+        if (delta) currentBotText += delta;
+        break;
+      }
+
+      case 'response.output_text.done':
+      case 'response.audio_transcript.done': {
         const text = (currentBotText || '').trim();
         if (text) {
           conversationLog.push({ from: 'bot', text });
@@ -976,9 +1035,11 @@ wss.on('connection', (connection, req) => {
       }
 
       case 'conversation.item.input_audio_transcription.completed': {
-        const transcript = msg.transcript || '';
-        const t = transcript.trim();
+        const transcriptRaw = msg.transcript || '';
+        let t = transcriptRaw.trim();
         if (t) {
+          // ניקוי תמלול: רווחים כפולים, רווחים לפני סימני פיסוק
+          t = t.replace(/\s+/g, ' ').replace(/\s+([,.:;!?])/g, '$1');
           conversationLog.push({ from: 'user', text: t });
           checkUserGoodbye(t);
         }
@@ -1096,7 +1157,6 @@ wss.on('connection', (connection, req) => {
     } else if (event === 'stop') {
       logInfo(tag, 'Twilio stream stopped.');
       twilioClosed = true;
-      // בשלב הזה אין צורך בסגיר – השיחה כבר הסתיימה בצד Twilio, רק מנקים ושולחים וובהוק
       if (!callEnded) {
         endCall('twilio_stop', MB_CLOSING_SCRIPT);
       }
