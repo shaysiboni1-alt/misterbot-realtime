@@ -6,7 +6,7 @@
 // חוקים עיקריים לפי ה-MASTER PROMPT:
 // - שיחה בעברית כברירת מחדל, לשון רבים, טון חם וקצר.
 // - שליטה מלאה דרך ENV (פתיח, סגיר, פרומפט כללי, KB עסקי, טיימרים, לידים, VAD).
-// - טיימר שקט + ניתוק אוטומטי + מקסימום זמן שיחה.
+// - טיימר שקט + ניתוק אוטומטי + מגבלת זמן שיחה.
 // - לוג שיחה + וובהוק לידים (אם מופעל) + PARSING חכם ללידים.
 //
 // דרישות:
@@ -97,7 +97,8 @@ const MB_IDLE_HANGUP_MS = envNumber('MB_IDLE_HANGUP_MS', 90000);  // 90 שניו
 // מגבלת זמן שיחה – ברירת מחדל 5 דקות
 const MB_MAX_CALL_MS = envNumber('MB_MAX_CALL_MS', 5 * 60 * 1000);
 const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000); // 45 שניות לפני הסוף
-const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 8000); // לא ישמש בפועל יותר לנטע
+// נשאיר את הפרמטר אבל לא נשתמש בו בפועל לנטע (הניתוק מיידי אחרי הסגיר)
+const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 8000);
 
 // האם מותר ללקוח לקטוע את הבוט (barge-in)
 const MB_ALLOW_BARGE_IN = envBool('MB_ALLOW_BARGE_IN', false);
@@ -166,7 +167,6 @@ function logError(tag, msg, extra) {
 
 // -----------------------------
 // Helper – נורמליזציה למספר טלפון ישראלי
-// 9 ספרות לנייח (02/03/04/07/08/09) או 10 ספרות לנייד (05/07) + תמיכה ב+972
 // -----------------------------
 function normalizePhoneNumber(rawPhone, callerNumber) {
   function toDigits(num) {
@@ -318,7 +318,7 @@ ${langsTxt}
   - ורק אחר כך עוברים לשאלה הבאה.
 - סדר מומלץ:
   1. קודם: "איך אפשר לפנות אליכם? אפשר שם פרטי או מלא."
-  2. אחרי שהתשובה מגיעה: לשאול אם יש שם עסק. אם אין – לדלג הלאה.
+  2. אחרי שהתשובה מגיעה: לשאול אם יש שם עסק. אם אין – לציין "לא רלוונטי" בשדה שם העסק.
   3. אחר כך: "מה מספר הטלפון שנוח לחזור אליכם אליו?" (לבקש ספרה-ספרה ולהקריא בחזרה במדויק).
   4. לבסוף: לבקש במשפט אחד קצר מה סיבת הפנייה.
 - בסיום איסוף הפרטים:
@@ -342,7 +342,7 @@ ${langsTxt}
   "טוב תודה", "טוב תודה, זהו", "בסדר תודה", "שיהיה יום טוב", "לילה טוב", "שבוע טוב",
   "goodbye", "bye", "ok thanks" וכדומה –
   להבין שזאת סיום שיחה.
-- במקרה כזה – לתת משפט סיום קצר וחיובי, ולהיפרד בעדינות.
+- במקרה כזה – לתת משפט סיום קצר וחיובי, ולהיפרד בעדינות. מיד אחרי משפט הסיום – ניתוק השיחה.
 
 ${businessKb}
 
@@ -613,7 +613,7 @@ wss.on('connection', (connection, req) => {
           is_lead: false,
           lead_type: 'unknown',
           full_name: null,
-          business_name: null,
+          business_name: 'לא רלוונטי',
           phone_number: null,
           reason: null,
           notes: null
@@ -639,6 +639,15 @@ wss.on('connection', (connection, req) => {
 
       parsedLead.caller_id_raw = callerIdRaw;
       parsedLead.caller_id_normalized = callerIdNormalized;
+
+      // חובה: business_name תמיד מלא
+      if (
+        !parsedLead.business_name ||
+        typeof parsedLead.business_name !== 'string' ||
+        !parsedLead.business_name.trim()
+      ) {
+        parsedLead.business_name = 'לא רלוונטי';
+      }
 
       const isFullLead =
         parsedLead.is_lead === true &&
@@ -672,6 +681,8 @@ wss.on('connection', (connection, req) => {
 
       if (!res.ok) {
         logError(tag, `Lead webhook HTTP ${res.status}`, await res.text());
+      } else {
+        logInfo(tag, `Lead webhook delivered successfully. status=${res.status}`);
       }
     } catch (err) {
       logError(tag, 'Error sending lead webhook', err);
@@ -679,17 +690,23 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: סיום שיחה מרוכז
+  // Helper: סיום שיחה מרוכז – ניתוק מיידי אחרי הסגיר
   // -----------------------------
-  async function endCall(reason, closingMessage) {
+  function endCall(reason, closingMessage) {
     logInfo(tag, `endCall called with reason="${reason}"`);
 
     if (idleCheckInterval) clearInterval(idleCheckInterval);
     if (maxCallTimeout) clearTimeout(maxCallTimeout);
     if (maxCallWarningTimeout) clearTimeout(maxCallWarningTimeout);
 
-    await sendLeadWebhook(reason, closingMessage || MB_CLOSING_SCRIPT);
+    // 🔔 לא מחכים ל-webhook – שולחים בפייר אנד פורגט
+    if (MB_ENABLE_LEAD_CAPTURE && MB_WEBHOOK_URL) {
+      sendLeadWebhook(reason, closingMessage || MB_CLOSING_SCRIPT).catch((err) =>
+        logError(tag, 'sendLeadWebhook fire-and-forget error', err)
+      );
+    }
 
+    // קודם כל סוגרים OpenAI ו-Twilio – כדי שהלקוח יתנתק מיד
     if (!openAiClosed && openAiWs.readyState === WebSocket.OPEN) {
       openAiClosed = true;
       openAiWs.close();
