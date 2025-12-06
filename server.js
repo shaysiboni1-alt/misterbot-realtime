@@ -13,8 +13,6 @@
 //   npm install express ws dotenv
 //   (מומלץ Node 18+ כדי ש-fetch יהיה זמין גלובלית)
 //
-// להרצה (למשל):
-//   PORT=3000 node server.js
 //
 // Twilio Voice Webhook ->  POST /twilio-voice  (TwiML)
 // Twilio Media Streams -> wss://<domain>/twilio-media-stream
@@ -167,22 +165,45 @@ function logError(tag, msg, extra) {
 }
 
 // -----------------------------
-// Helper – נורמליזציה למספר טלפון (10 ספרות ישראלי)
+// Helper – נורמליזציה למספר טלפון ישראלי
+// 9 ספרות לנייח (02/03/04/07/08/09) או 10 ספרות לנייד (05/07) + תמיכה ב+972
 // -----------------------------
 function normalizePhoneNumber(rawPhone, callerNumber) {
-  function clean(num) {
+  function toDigits(num) {
     if (!num) return null;
-    let digits = String(num).replace(/\D/g, '');
+    return String(num).replace(/\D/g, '');
+  }
 
-    // +97250xxxxxxx -> 050xxxxxxx
-    if (digits.startsWith('972') && digits.length === 12) {
-      digits = '0' + digits.slice(3);
+  function normalize972(digits) {
+    if (digits.startsWith('972') && (digits.length === 11 || digits.length === 12)) {
+      // גם לנייד (12) וגם לנייח (11) – משאירים את המספר אחרי 972 ומוסיפים 0
+      return '0' + digits.slice(3);
     }
+    return digits;
+  }
 
-    if (/^0\d{9}$/.test(digits)) {
-      return digits;
+  function isValidIsraeliPhone(digits) {
+    if (!/^0\d{8,9}$/.test(digits)) return false; // 9 או 10 ספרות, מתחיל ב-0
+    const prefix2 = digits.slice(0, 2);
+
+    if (digits.length === 9) {
+      // נייחים קלאסיים
+      return ['02', '03', '04', '07', '08', '09'].includes(prefix2);
+    } else {
+      // 10 ספרות – ניידים/07 וכדומה
+      if (prefix2 === '05' || prefix2 === '07') return true;
+      // ליתר ביטחון נאפשר גם 02/03/04/08/09 עם 10 ספרות
+      if (['02', '03', '04', '07', '08', '09'].includes(prefix2)) return true;
+      return false;
     }
-    return null;
+  }
+
+  function clean(num) {
+    let digits = toDigits(num);
+    if (!digits) return null;
+    digits = normalize972(digits);
+    if (!isValidIsraeliPhone(digits)) return null;
+    return digits;
   }
 
   const fromLead = clean(rawPhone);
@@ -260,16 +281,19 @@ ${langsTxt}
 - כאשר מבקשים מספר טלפון – לבקש ספרה-ספרה בקול, בקצב איטי וברור.
 - להתייחס למספר כרצף ספרות בלבד.
 - לא להוסיף +972 ולא להוריד 0 בהתחלה.
+- מספר תקין בישראל:
+  - 10 ספרות למספרי סלולר, בדרך כלל מתחילים ב-05 או 07.
+  - או 9 ספרות למספרים נייחים שמתחילים בקידומות 02, 03, 04, 07, 08, 09.
 - כאשר חוזרים על המספר ללקוח:
   - אסור לוותר על שום ספרה.
   - אסור לאחד ספרות ("שלושים ושתיים") – יש לומר כל ספרה בנפרד: "שלוש, שתיים".
+  - חייבים להקריא את המספר בדיוק כפי שנקלט: אותן הספרות, באותו הסדר, בלי להמציא או לתקן ספרות.
   - אם אינכם בטוחים במספר – לבקש בנימוס שיחזרו עליו שוב במקום לנחש מספר אחר.
-  - אם המספר כולל 10 ספרות – בעת החזרה על המספר חייבים להקריא 10 ספרות בדיוק. אם שמעתם פחות – בקשו מהלקוח לחזור שוב כדי לא לטעות.
-  - לפני שאתם מקריאים מספר, ודאו שיש לכם בדיוק 10 ספרות. אם חסרה ספרה או יש ספק – בקשו שוב מהלקוח לומר אותו, ואל תקצרו או תסכמו.
+  - אם המספר כולל 10 ספרות או 9 ספרות – בעת החזרה על המספר חייבים להקריא את כל הספרות בדיוק (10 או 9). אם שמעתם פחות – בקשו מהלקוח לחזור שוב כדי לא לטעות.
+  - לפני שאתם מקריאים מספר, ודאו שיש לכם בדיוק 9 או 10 ספרות. אם חסרה ספרה או יש ספק – בקשו שוב מהלקוח לומר אותו, ואל תקצרו או תסכמו.
   - למשל: אם נאמר "0 5 0 3 2 2 2 2 3 7" אתם חייבים להגיד בקול: "אפס, חמש, אפס, שלוש, שתיים, שתיים, שתיים, שתיים, שלוש, שבע" – בלי לדלג על אף "שתיים" ובלי לחבר אותן.
 - חשוב: אל תוסיפו או תמציאו ספרות שלא נאמרו בשיחה.
-- בישראל רוב מספרי הסלולר הם באורך 10 ספרות ומתחילים ב-0. אם המספר שאתם לא בטוחים לגביו אינו באורך 10 ספרות או לא מתחיל ב-0 – עדיף להחזיר phone_number: null מאשר לנחש מספר.
-
+- אם המספר שנשמע אינו באורך 9 או 10 ספרות, או שאינו מתחיל בקידומת תקינה – עדיף להחזיר phone_number: null, ולבקש מהלקוח לחזור על המספר במקום לנחש.
 - אם הלקוח אומר "תחזרו למספר שממנו אני מתקשר" או "למספר המזוהה":
   - אל תקריאו מספר בקול.
   - תגידו משפט בסגנון: "מעולה, ירשם שנחזור אליכם למספר שממנו אתם מתקשרים כעת."
@@ -417,7 +441,7 @@ async function extractLeadFromConversation(conversationLog) {
 - "phone_number": אם בשיחה מופיע מספר טלפון של הלקוח – החזר אותו כרצף ספרות בלבד, בלי רווחים ובלי +972 ובלי להוריד 0 בהתחלה.
   אם נשמעים כמה מספרים – בחר את המספר הרלוונטי ביותר ליצירת קשר, אחרת null.
   אל תוסיף ספרות שלא נאמרו, ואל תנחש מספר אם לא ברור.
-  אם המספר שנשמע אינו באורך 10 ספרות או לא מתחיל ב-0 – עדיף להחזיר phone_number: null.
+  אם המספר שנשמע אינו באורך 10 ספרות או 9 ספרות, או שאינו מתחיל בקידומת תקינה – עדיף להחזיר phone_number: null.
 - "reason": תיאור קצר וקולע בעברית של סיבת הפנייה (משפט אחד קצר).
 - "notes": כל דבר נוסף שיכול להיות רלוונטי לאיש מכירות / שירות (למשל: "מעוניין בדמו לבוט קולי", "פנייה דחופה", "שאל על מחירים" וכו').
 
@@ -585,8 +609,16 @@ wss.on('connection', (connection, req) => {
       let parsedLead = await extractLeadFromConversation(conversationLog);
 
       if (!parsedLead || typeof parsedLead !== 'object') {
-        logInfo(tag, 'No parsed lead object – skipping webhook.');
-        return;
+        logInfo(tag, 'No parsed lead object – sending fallback payload with caller only.');
+        parsedLead = {
+          is_lead: false,
+          lead_type: 'unknown',
+          full_name: null,
+          business_name: null,
+          phone_number: null,
+          reason: null,
+          notes: null
+        };
       }
 
       if (!parsedLead.phone_number && callerNumber && conversationMentionsCallerId()) {
@@ -850,7 +882,7 @@ wss.on('connection', (connection, req) => {
         break;
       }
 
-      // ⚠️ כאן התיקון: מאזינים ל־response.audio.delta ולא ל־response.output_audio.delta
+      // שליחת אודיו לטוויליו
       case 'response.audio.delta': {
         const b64 = msg.delta;
         if (!b64 || !streamSid) break;
