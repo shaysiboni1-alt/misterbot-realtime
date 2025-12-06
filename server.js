@@ -702,8 +702,8 @@ wss.on('connection', (connection, req) => {
         };
       }
 
-      // ✅ אם השיחה מזכירה "מספר מזוהה" – תמיד נכריח את phone_number להיות המספר המזוהה
-      if (callerNumber && conversationMentionsCallerId()) {
+      // אם אין טלפון מה-LLM ויש אזכור של מזוהה – נשלים ממספר המזוהה
+      if (!parsedLead.phone_number && callerNumber && conversationMentionsCallerId()) {
         parsedLead.phone_number = callerNumber;
         parsedLead.notes =
           (parsedLead.notes || '') +
@@ -711,6 +711,7 @@ wss.on('connection', (connection, req) => {
           'הלקוח ביקש חזרה למספר המזוהה ממנו התקשר.';
       }
 
+      // נורמליזציה של מספר הטלפון שנאסף
       const normalizedPhone = normalizePhoneNumber(
         parsedLead.phone_number,
         callerNumber
@@ -737,17 +738,32 @@ wss.on('connection', (connection, req) => {
         (parsedLead.lead_type === 'new' || parsedLead.lead_type === 'existing') &&
         !!parsedLead.phone_number;
 
+      // 🟢 לוגיקה לפי מה שביקשת:
+      // phone_number = מספר החזרה בפועל:
+      //   - אם הלקוחה נתנה מספר אחר → parsedLead.phone_number (normalized)
+      //   - אחרת → נשתמש במזוהה (normalized ואם אין אז RAW).
+      const finalPhoneNumber =
+        parsedLead.phone_number ||
+        callerIdNormalized ||
+        callerIdRaw;
+
+      // CALLERID = תמיד המזוהה (מנורמל אם אפשר, אחרת RAW) – חוק ברזל.
+      const finalCallerId =
+        callerIdNormalized ||
+        callerIdRaw ||
+        null;
+
       const payload = {
         streamSid,
         callSid,
         callerNumber: callerIdRaw,
         callerIdRaw,
         callerIdNormalized,
-        // ✅ חוק חדש:
-        // 1. phone_number – תמיד המספר "הנבחר" לחזרה (מזוהה או מספר אחר שנאמר)
-        // 2. CALLERID – תמיד המספר המזוהה מהשיחה (גם אם בחרו מספר אחר לחזרה)
-        phone_number: parsedLead.phone_number || null,
-        CALLERID: callerIdNormalized || callerIdRaw || null,
+
+        // 👇 שני הפרמטרים שביקשת במפורש:
+        phone_number: finalPhoneNumber,
+        CALLERID: finalCallerId,
+
         botName: BOT_NAME,
         businessName: BUSINESS_NAME,
         startedAt: new Date(callStartTs).toISOString(),
@@ -778,7 +794,7 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: סיום שיחה מרוכז – ניתוק אחרי ಸגיר
+  // Helper: סיום שיחה מרוכז – ניתוק אחרי סגיר
   // -----------------------------
   function endCall(reason, closingMessage) {
     if (callEnded) {
