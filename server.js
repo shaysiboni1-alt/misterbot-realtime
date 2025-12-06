@@ -73,7 +73,18 @@ const MB_LANGUAGES = (process.env.MB_LANGUAGES || 'he,en,ru')
 const MB_SPEECH_SPEED = envNumber('MB_SPEECH_SPEED', 1.15);
 
 const OPENAI_VOICE = process.env.OPENAI_VOICE || 'alloy';
-const MAX_OUTPUT_TOKENS = process.env.MAX_OUTPUT_TOKENS || 'inf';
+
+// ניהול נכון של MAX_OUTPUT_TOKENS – תמיד מספר או "inf"
+const MAX_OUTPUT_TOKENS_ENV = process.env.MAX_OUTPUT_TOKENS;
+let MAX_OUTPUT_TOKENS = 'inf';
+if (MAX_OUTPUT_TOKENS_ENV) {
+  const n = Number(MAX_OUTPUT_TOKENS_ENV);
+  if (Number.isFinite(n) && n > 0) {
+    MAX_OUTPUT_TOKENS = n;
+  } else if (MAX_OUTPUT_TOKENS_ENV === 'inf') {
+    MAX_OUTPUT_TOKENS = 'inf';
+  }
+}
 
 // VAD – ברירות מחדל מחוזקות לרעשי רקע
 const MB_VAD_THRESHOLD = envNumber('MB_VAD_THRESHOLD', 0.65);
@@ -85,7 +96,7 @@ const MB_VAD_SUFFIX_MS = envNumber('MB_VAD_SUFFIX_MS', 200); // קטע שקט נ
 const MB_IDLE_WARNING_MS = envNumber('MB_IDLE_WARNING_MS', 40000); // 40 שניות
 const MB_IDLE_HANGUP_MS = envNumber('MB_IDLE_HANGUP_MS', 90000);  // 90 שניות
 
-// מגבלת זמן שיחה – ברירת מחדל 5 דקות (אפשר לשנות ב-ENV אם תרצה)
+// מגבלת זמן שיחה – ברירת מחדל 5 דקות
 const MB_MAX_CALL_MS = envNumber('MB_MAX_CALL_MS', 5 * 60 * 1000);
 const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000); // 45 שניות לפני הסוף
 const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 8000); // זמן חסד לפני ניתוק אחרי סגיר
@@ -521,29 +532,6 @@ wss.on('connection', (connection, req) => {
   // האם יש response פעיל במודל
   let hasActiveResponse = false;
 
-  // פתיח – שולחים רק אחרי שיש גם OpenAI מוכן וגם streamSid
-  const greetingText = MB_OPENING_SCRIPT;
-  let greetingSent = false;
-
-  function maybeSendGreeting() {
-    if (greetingSent) return;
-    if (!openAiReady) {
-      logDebug(tag, 'Greeting not sent yet – OpenAI not ready.');
-      return;
-    }
-    if (!streamSid) {
-      logDebug(tag, 'Greeting not sent yet – streamSid not set.');
-      return;
-    }
-
-    greetingSent = true;
-    logInfo(tag, 'Sending opening greeting via model.');
-    sendModelPrompt(
-      `פתחי את השיחה עם הלקוח במשפט הבא (אפשר לשנות מעט את הניסוח אבל לא להאריך): "${greetingText}" ואז עצרי והמתיני לתשובה שלו.`,
-      'opening_greeting'
-    );
-  }
-
   // -----------------------------
   // Helper: שליחת טקסט למודל עם הגנה על response כפול
   // -----------------------------
@@ -571,6 +559,7 @@ wss.on('connection', (connection, req) => {
     openAiWs.send(JSON.stringify(item));
     openAiWs.send(JSON.stringify({ type: 'response.create' }));
     hasActiveResponse = true;
+    logInfo(tag, `Sending model prompt (${purpose || 'no-tag'})`);
   }
 
   // -----------------------------
@@ -822,8 +811,11 @@ wss.on('connection', (connection, req) => {
     logDebug(tag, 'Sending session.update to OpenAI.', sessionUpdate);
     openAiWs.send(JSON.stringify(sessionUpdate));
 
-    // הפתיח יישלח רק אחרי שגם Twilio שלח start ויש streamSid
-    maybeSendGreeting();
+    const greetingText = MB_OPENING_SCRIPT;
+    sendModelPrompt(
+      `פתחי את השיחה עם הלקוח במשפט הבא (אפשר לשנות מעט את הניסוח אבל לא להאריך): "${greetingText}" ואז עצרי והמתיני לתשובה שלו.`,
+      'opening_greeting'
+    );
   });
 
   openAiWs.on('message', (data) => {
@@ -860,12 +852,7 @@ wss.on('connection', (connection, req) => {
 
       case 'response.output_audio.delta': {
         const b64 = msg.delta;
-        if (!b64) break;
-        if (!streamSid) {
-          // זה קורה אם המודל מחזיר אודיו לפני שקיבלנו start מטוויליו
-          logDebug(tag, 'Received audio delta before streamSid is set – skipping frame.');
-          break;
-        }
+        if (!b64 || !streamSid) break;
         botSpeaking = true;
         if (connection.readyState === WebSocket.OPEN) {
           const twilioMsg = {
@@ -873,7 +860,6 @@ wss.on('connection', (connection, req) => {
             streamSid,
             media: { payload: b64 }
           };
-          logDebug(tag, `Sending audio frame to Twilio. size=${b64.length}`);
           connection.send(JSON.stringify(twilioMsg));
         }
         break;
@@ -899,6 +885,12 @@ wss.on('connection', (connection, req) => {
           conversationLog.push({ from: 'user', text: t });
           checkUserGoodbye(t);
         }
+        break;
+      }
+
+      case 'error': {
+        // ⚠️ שגיאה מה-Realtime – חשוב לראות בלוגים
+        logError(tag, 'OpenAI Realtime error event', msg);
         break;
       }
 
@@ -952,9 +944,6 @@ wss.on('connection', (connection, req) => {
         tag,
         `Twilio stream started. streamSid=${streamSid}, callSid=${callSid}, caller=${callerNumber}`
       );
-
-      // עכשיו שיש streamSid – אפשר לשלוח פתיח אם OpenAI כבר מוכן
-      maybeSendGreeting();
 
       // Idle checker
       idleCheckInterval = setInterval(() => {
