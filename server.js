@@ -64,7 +64,8 @@ const MB_CLOSING_SCRIPT =
 const MB_GENERAL_PROMPT = process.env.MB_GENERAL_PROMPT || '';
 const MB_BUSINESS_PROMPT = process.env.MB_BUSINESS_PROMPT || '';
 
-const MB_LANGUAGES = (process.env.MB_LANGUAGES || 'he,en,ru')
+// הוספת ערבית כברירת מחדל לשפות
+const MB_LANGUAGES = (process.env.MB_LANGUAGES || 'he,en,ru,ar')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
@@ -103,6 +104,9 @@ const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 5000);
 
 // האם מותר ללקוח לקטוע את הבוט (barge-in)
 const MB_ALLOW_BARGE_IN = envBool('MB_ALLOW_BARGE_IN', false);
+
+// Tail קטן שבו עדיין לא מקשיבים אחרי שהבוט סיים לדבר (מילישניות)
+const MB_NO_BARGE_TAIL_MS = envNumber('MB_NO_BARGE_TAIL_MS', 600);
 
 // לידים / וובהוק
 const MB_ENABLE_LEAD_CAPTURE = envBool('MB_ENABLE_LEAD_CAPTURE', false);
@@ -254,7 +258,7 @@ function buildSystemInstructions() {
 
   const langsTxt =
     MB_LANGUAGES.length > 0
-      ? `שפות נתמכות: ${MB_LANGUAGES.join(', ')}. ברירת מחדל: עברית. אם הלקוח מדבר באנגלית או רוסית – עוברים לשפה שלו.`
+      ? `שפות נתמכות: ${MB_LANGUAGES.join(', ')}. ברירת מחדל: עברית. אם הלקוח מדבר באנגלית, רוסית או ערבית – עוברים לשפה שלו לפי הצורך.`
       : 'ברירת מחדל: עברית.';
 
   const staticKb =
@@ -296,7 +300,8 @@ ${langsTxt}
 
 חוקי שיחה כלליים:
 - ברירת מחדל בעברית.
-- לא להחליף שפה ללא סיבה ברורה (הלקוח מדבר באנגלית או רוסית).
+- אם הלקוח מבקש במפורש לדבר בשפה מסוימת (אנגלית, רוסית או ערבית) – להיענות לבקשה ולעבור לשפה המבוקשת.
+- לא להחליף שפה ללא סיבה ברורה (הלקוח מדבר בפועל באנגלית, רוסית או ערבית, או מבקש זאת במפורש).
 - לא להתנצל כל הזמן, לא לחפור, לא לחזור על עצמך.
 - לנהל שיחה זורמת, לשאול שאלות המשך קצרות כשצריך.
 - בסביבה רועשת (רכב, אנשים מדברים) – אם אינכם בטוחים במה שנאמר, אל תענו תשובה מיידית. בקשו מהלקוח לחזור שוב לאט ובברור במקום להמציא תשובה.
@@ -341,6 +346,12 @@ ${langsTxt}
 - כאשר הלקוח מדבר ברוסית – לדבר ברוסית פשוטה, יומיומית, בלי מילים גבוהות או פורמליות מדי.
 - להשתמש במשפטים קצרים מאוד (משפט או שניים בכל פעם).
 - אם משהו לא ברור – לבקש מהלקוח לחזור על המשפט לאט יותר.
+
+ערבית:
+- כאשר הלקוח מדבר בערבית או מבקש במפורש לעבור לערבית – לדבר בערבית יומיומית ופשוטה.
+- להשתמש במשפטים קצרים מאוד (משפט או שניים בכל פעם), בלי שפה ספרותית גבוהה.
+- אם משהו לא ברור – לבקש בנימוס מהלקוח לחזור שוב על הדברים לאט וברור.
+- לא לערבב בין ערבית לעברית/אנגלית באותו משפט בלי סיבה – לבחור שפה אחת ברורה לפי הלקוח.
 
 מתחרים:
 - מותר להסביר באופן כללי על עולם הבוטים והאוטומציה.
@@ -686,8 +697,11 @@ wss.on('connection', (connection, req) => {
   // האם יש response פעיל במודל
   let hasActiveResponse = false;
 
-  // דגל: האם זה עדיין "התור של הבוט" – כשזה true ו-barge-in כבוי, אנחנו לא מקשיבים ללקוח
+  // דגל: האם זה עדיין "התור של הבוט"
   let botTurnActive = false;
+
+  // טיימסטמפ עד מתי אסור להקשיב ללקוח (ברמת זמן, כדי להבטיח שאין דיבור חופף)
+  let noListenUntilTs = 0;
 
   // האם וובהוק לידים כבר נשלח בשיחה הזו
   let leadWebhookSent = false;
@@ -719,7 +733,7 @@ wss.on('connection', (connection, req) => {
     openAiWs.send(JSON.stringify(item));
     openAiWs.send(JSON.stringify({ type: 'response.create' }));
     hasActiveResponse = true;
-    botTurnActive = true;   // מרגע זה – זה "התור של הבוט" (כשbarge-in כבוי לא מקשיבים ללקוח)
+    botTurnActive = true;   // מרגע זה – זה "התור של הבוט"
     logInfo(tag, `Sending model prompt (${purpose || 'no-tag'})`);
   }
 
@@ -802,8 +816,7 @@ wss.on('connection', (connection, req) => {
         parsedLead.business_name = 'לא רלוונטי';
       }
 
-      // ❗ לוגיקה: מבחינתך כל ליד אמיתי עם טלפון → וובהוק,
-      // לא משנה אם lead_type "new" / "existing" / "unknown".
+      // ❗ לוגיקה: כל ליד אמיתי עם טלפון → וובהוק
       const isFullLead =
         parsedLead.is_lead === true &&
         !!parsedLead.phone_number;
@@ -859,7 +872,7 @@ wss.on('connection', (connection, req) => {
         CALLERID: finalCallerId
       });
 
-      // חוק: פעם אחת בלבד לכל שיחה – גם אם הלקוח משנה פרטים, הפרשנות תמיד לפי השיחה המלאה עד לרגע הסיום.
+      // חוק: פעם אחת בלבד לכל שיחה
       leadWebhookSent = true;
 
       const res = await fetch(MB_WEBHOOK_URL, {
@@ -928,6 +941,7 @@ wss.on('connection', (connection, req) => {
     botSpeaking = false;
     hasActiveResponse = false;
     botTurnActive = false;
+    noListenUntilTs = 0;
   }
 
   // -----------------------------
@@ -1068,7 +1082,8 @@ wss.on('connection', (connection, req) => {
         voice: OPENAI_VOICE,
         input_audio_format: 'g711_ulaw',
         output_audio_format: 'g711_ulaw',
-        input_audio_transcription: { model: 'whisper-1', language: 'he' },
+        // הסרת language כדי לאפשר זיהוי אוטומטי (עברית / אנגלית / רוסית / ערבית)
+        input_audio_transcription: { model: 'whisper-1' },
         turn_detection: {
           type: 'server_vad',
           threshold: MB_VAD_THRESHOLD,
@@ -1104,7 +1119,7 @@ wss.on('connection', (connection, req) => {
     switch (type) {
       case 'response.created':
         currentBotText = '';
-        // כאן עדיין לא מדברים, אבל זה חלק מהתור של הבוט – botTurnActive כבר דולק מ-sendModelPrompt
+        // עדיין חלק מתור הבוט – botTurnActive דולק מ-sendModelPrompt
         break;
 
       case 'response.output_text.delta': {
@@ -1134,6 +1149,11 @@ wss.on('connection', (connection, req) => {
         const b64 = msg.delta;
         if (!b64 || !streamSid) break;
         botSpeaking = true;
+
+        // כל פעם שיש אודיו חדש – מאריכים מעט את חלון ה"לא מקשיבים"
+        const now = Date.now();
+        noListenUntilTs = now + MB_NO_BARGE_TAIL_MS;
+
         if (connection.readyState === WebSocket.OPEN) {
           const twilioMsg = {
             event: 'media',
@@ -1146,9 +1166,9 @@ wss.on('connection', (connection, req) => {
       }
 
       case 'response.audio.done': {
-        // האודיו הסתיים – אם זה היה משפט סגירה, מנתקים מיד.
+        // האודיו הסתיים – עדיין יש לנו tail קטן שבו לא מקשיבים (noListenUntilTs)
         botSpeaking = false;
-        botTurnActive = false; // סיום "תור הבוט" – עכשיו אפשר שוב להקשיב ללקוח
+        botTurnActive = false;
         if (pendingHangup && !callEnded) {
           const ph = pendingHangup;
           pendingHangup = null;
@@ -1161,7 +1181,7 @@ wss.on('connection', (connection, req) => {
       case 'response.completed': {
         botSpeaking = false;
         hasActiveResponse = false;
-        botTurnActive = false; // גיבוי – אם לא קיבלנו audio.done
+        botTurnActive = false;
         // במקרה שאין כלל אודיו (למשל טקסט בלבד) – נסיים גם כאן אם יש pendingHangup
         if (pendingHangup && !callEnded) {
           const ph = pendingHangup;
@@ -1188,7 +1208,8 @@ wss.on('connection', (connection, req) => {
         logError(tag, 'OpenAI Realtime error event', msg);
         hasActiveResponse = false;
         botSpeaking = false;
-        botTurnActive = false; // שלא ניתקע על מצב "תור בוט"
+        botTurnActive = false;
+        noListenUntilTs = 0;
         break;
       }
 
@@ -1287,11 +1308,14 @@ wss.on('connection', (connection, req) => {
       if (!openAiReady || openAiWs.readyState !== WebSocket.OPEN) return;
 
       // 🔒 חוק barge-in:
-      // MB_ALLOW_BARGE_IN = false → נטע *לא* מקשיבה בכלל בזמן שהתור שלה עדיין פעיל
-      // (מהרגע ששלחנו לה prompt ועד שהאודיו/התשובה הסתיימו).
-      if (!MB_ALLOW_BARGE_IN && botTurnActive) {
-        // כשאסור barge-in – מתעלמים מכל אודיו שמגיע בזמן "תור הבוט".
-        return;
+      // MB_ALLOW_BARGE_IN = false → נטע לא מקשיבה בכלל
+      // כל עוד אנחנו בתוך חלון noListenUntilTs (כלומר "תור הבוט" + זנב קצר אחרי).
+      if (!MB_ALLOW_BARGE_IN) {
+        const now = Date.now();
+        if (now < noListenUntilTs) {
+          // מתעלמים מכל אודיו שמגיע בזמן שהבוט מדבר או מיד אחרי
+          return;
+        }
       }
 
       const oaMsg = {
