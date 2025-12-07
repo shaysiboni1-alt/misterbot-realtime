@@ -1152,27 +1152,19 @@ wss.on('connection', (connection, req) => {
       }
 
       case 'response.audio.done': {
+        // סוף האודיו – לא מנתקים כאן.
+        // הניתוק קורה *רק* דרך ה-GRACE שנקבע ב-scheduleEndCall / scheduleHangupAfterBotClosing.
         botSpeaking = false;
         botTurnActive = false;
-        if (pendingHangup && !callEnded) {
-          const ph = pendingHangup;
-          pendingHangup = null;
-          logInfo(tag, 'Closing audio finished, ending call now.');
-          endCall(ph.reason, ph.closingMessage);
-        }
         break;
       }
 
       case 'response.completed': {
+        // סוף ה-response (טקסטואלית) – שוב, לא מנתקים כאן.
+        // הניתוק נשלט רק דרך GRACE.
         botSpeaking = false;
         hasActiveResponse = false;
         botTurnActive = false;
-        if (pendingHangup && !callEnded) {
-          const ph = pendingHangup;
-          pendingHangup = null;
-          logInfo(tag, 'Response completed for closing, ending call now.');
-          endCall(ph.reason, ph.closingMessage);
-        }
         break;
       }
 
