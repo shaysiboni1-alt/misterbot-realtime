@@ -895,7 +895,7 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: תזמון ניתוק כאשר הבוט כבר אמר את משפט הסיום (או כללית משפט פרידה)
+  // Helper: תזמון ניתוק כאשר הבוט כבר אמר את משפט הסיום (לפי MB_CLOSING_SCRIPT בלבד)
   // -----------------------------
   function scheduleHangupAfterBotClosing(reason) {
     if (callEnded) return;
@@ -982,58 +982,20 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: בדיקת משפט סיום של הבוט (גם לפי מילים כלליות)
+  // Helper: בדיקת משפט סיום של הבוט – **רק** לפי MB_CLOSING_SCRIPT מה-ENV
   // -----------------------------
   function checkBotClosing(botText) {
-    if (!botText) return;
+    if (!botText || !NORMALIZED_CLOSING_SCRIPT) return;
     const norm = normalizeForClosing(botText);
     if (!norm) return;
 
-    // 1. התאמה ל-MB_CLOSING_SCRIPT מה-ENV
+    // ננתק רק אם משפט הסיום המוגדר ב-ENV מופיע בצורה ברורה בטקסט
     if (
-      NORMALIZED_CLOSING_SCRIPT &&
-      (norm.includes(NORMALIZED_CLOSING_SCRIPT) ||
-        NORMALIZED_CLOSING_SCRIPT.includes(norm))
+      norm.includes(NORMALIZED_CLOSING_SCRIPT) ||
+      NORMALIZED_CLOSING_SCRIPT.includes(norm)
     ) {
       logInfo(tag, `Detected configured bot closing phrase in output: "${botText}"`);
       scheduleHangupAfterBotClosing('bot_closing_config');
-      return;
-    }
-
-    // 2. זיהוי כללי: מילים של סיום / פרידה
-    const closingKeywords = [
-      'להתראות',
-      'שיהיה יום טוב',
-      'שיהיה לכם יום טוב',
-      'שיהיה יום נעים',
-      'יום נעים',
-      'יום טוב',
-      'שבוע טוב',
-      'לילה טוב',
-      'goodbye',
-      'bye',
-      'bye bye',
-      'have a nice day'
-    ];
-
-    const keepTalkingHints = [
-      'איך אפשר לעזור',
-      'יש עוד משהו',
-      'רצו לשאול',
-      'רצו לבדוק',
-      'יש לכם עוד',
-      'עוד שאלה',
-      'אפשר לעזור',
-      'איך אוכל לעזור',
-      'איך אני יכולה לעזור',
-      'איך נוכל לעזור'
-    ];
-
-    if (closingKeywords.some((p) => norm.includes(p))) {
-      if (!keepTalkingHints.some((p) => norm.includes(p))) {
-        logInfo(tag, `Detected generic closing phrase in bot output: "${botText}"`);
-        scheduleHangupAfterBotClosing('bot_closing_generic');
-      }
     }
   }
 
@@ -1152,19 +1114,27 @@ wss.on('connection', (connection, req) => {
       }
 
       case 'response.audio.done': {
-        // סוף האודיו – לא מנתקים כאן.
-        // הניתוק קורה *רק* דרך ה-GRACE שנקבע ב-scheduleEndCall / scheduleHangupAfterBotClosing.
         botSpeaking = false;
         botTurnActive = false;
+        if (pendingHangup && !callEnded) {
+          const ph = pendingHangup;
+          pendingHangup = null;
+          logInfo(tag, 'Closing audio finished, ending call now.');
+          endCall(ph.reason, ph.closingMessage);
+        }
         break;
       }
 
       case 'response.completed': {
-        // סוף ה-response (טקסטואלית) – שוב, לא מנתקים כאן.
-        // הניתוק נשלט רק דרך GRACE.
         botSpeaking = false;
         hasActiveResponse = false;
         botTurnActive = false;
+        if (pendingHangup && !callEnded) {
+          const ph = pendingHangup;
+          pendingHangup = null;
+          logInfo(tag, 'Response completed for closing, ending call now.');
+          endCall(ph.reason, ph.closingMessage);
+        }
         break;
       }
 
