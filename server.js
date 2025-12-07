@@ -116,7 +116,7 @@ const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 5000);
 // האם מותר ללקוח לקטוע את הבוט (barge-in)
 const MB_ALLOW_BARGE_IN = envBool('MB_ALLOW_BARGE_IN', false);
 
-// Tail שבו עדיין לא מקשיבים אחרי שהבוט סיים לדבר (מילישניות)
+// Tail (כרגע לא משתמשים בו בפועל, אפשר להשאיר לעתיד)
 const MB_NO_BARGE_TAIL_MS = envNumber('MB_NO_BARGE_TAIL_MS', 1600);
 
 // לידים / וובהוק
@@ -321,7 +321,7 @@ function buildSystemInstructions() {
 - אם הלקוח שואל "איזה שפות את מדברת?", "באיזה שפות את מדברת?", "מה עם ערבית?", "את יודעת ערבית?", "את מדברת ערבית?":
   תמיד לענות במשפט ברור שמכיל את כל הרשימה, למשל:
   "אני מדברת עברית, אנגלית, רוסית וערבית. אם תרצו, אפשר להמשיך גם בערבית."
-- אם הלקוח שואל במפורש "את מדברת ערבית?" או אומר בערבית "بتحكي عربي؟" / "بتعرفي عربي؟":
+- אם הלקוח שואל במפורש "את מדברת ערבית?" או אומר בערבית "بتحكي عربي؟" / "بتعرفי عربي؟":
   - חובה לענות בחיוב, למשל:
     "כן, אני מדברת גם ערבית. אם תרצו, אפשר להמשיך עכשיו בערבית."
 - אם הלקוח מבקש "תעברי לערבית", "בואי נדבר בערבית", "תני דוגמה בערבית" וכדומה – מיד לעבור לענות בערבית ומאותו רגע להמשיך בערבית, עד שהלקוח מבקש שפה אחרת.
@@ -745,12 +745,6 @@ wss.on('connection', (connection, req) => {
   // האם יש response פעיל במודל
   let hasActiveResponse = false;
 
-  // דגל: האם זה עדיין "התור של הבוט"
-  let botTurnActive = false;
-
-  // טיימסטמפ עד מתי אסור להקשיב ללקוח (זנב קצר אחרי סיום דיבור)
-  let noListenUntilTs = 0;
-
   // האם וובהוק לידים כבר נשלח בשיחה הזו
   let leadWebhookSent = false;
 
@@ -781,7 +775,6 @@ wss.on('connection', (connection, req) => {
     openAiWs.send(JSON.stringify(item));
     openAiWs.send(JSON.stringify({ type: 'response.create' }));
     hasActiveResponse = true;
-    botTurnActive = true;   // מרגע זה – זה "התור של הבוט"
     logInfo(tag, `Sending model prompt (${purpose || 'no-tag'})`);
   }
 
@@ -988,8 +981,6 @@ wss.on('connection', (connection, req) => {
 
     botSpeaking = false;
     hasActiveResponse = false;
-    botTurnActive = false;
-    noListenUntilTs = 0;
   }
 
   // -----------------------------
@@ -1129,7 +1120,7 @@ wss.on('connection', (connection, req) => {
         tag,
         `Detected user goodbye phrase (LOG ONLY, NO HANGUP): "${transcript}"`
       );
-      // לפי הדרישה – לא קוראים ל-scheduleEndCall כאן.
+      // לא מנתקים אוטומטית – רק לוג.
     }
   }
 
@@ -1219,7 +1210,6 @@ wss.on('connection', (connection, req) => {
     switch (type) {
       case 'response.created':
         currentBotText = '';
-        // עדיין חלק מתור הבוט – botTurnActive דולק מ-sendModelPrompt
         break;
 
       case 'response.output_text.delta': {
@@ -1252,10 +1242,6 @@ wss.on('connection', (connection, req) => {
         if (!b64 || !streamSid) break;
         botSpeaking = true;
 
-        // כל פעם שיש אודיו חדש – מאריכים מעט את חלון ה"לא מקשיבים"
-        const now = Date.now();
-        noListenUntilTs = now + MB_NO_BARGE_TAIL_MS;
-
         if (connection.readyState === WebSocket.OPEN) {
           const twilioMsg = {
             event: 'media',
@@ -1268,9 +1254,8 @@ wss.on('connection', (connection, req) => {
       }
 
       case 'response.audio.done': {
-        // האודיו הסתיים – עדיין יש לנו tail קטן שבו לא מקשיבים (noListenUntilTs)
+        // האודיו הסתיים
         botSpeaking = false;
-        botTurnActive = false;
         if (pendingHangup && !callEnded) {
           const ph = pendingHangup;
           pendingHangup = null;
@@ -1283,7 +1268,6 @@ wss.on('connection', (connection, req) => {
       case 'response.completed': {
         botSpeaking = false;
         hasActiveResponse = false;
-        botTurnActive = false;
         // במקרה שאין כלל אודיו (למשל טקסט בלבד) – נסיים גם כאן אם יש pendingHangup
         if (pendingHangup && !callEnded) {
           const ph = pendingHangup;
@@ -1310,8 +1294,6 @@ wss.on('connection', (connection, req) => {
         logError(tag, 'OpenAI Realtime error event', msg);
         hasActiveResponse = false;
         botSpeaking = false;
-        botTurnActive = false;
-        noListenUntilTs = 0;
         break;
       }
 
@@ -1409,15 +1391,12 @@ wss.on('connection', (connection, req) => {
 
       if (!openAiReady || openAiWs.readyState !== WebSocket.OPEN) return;
 
-      // 🔒 חוק barge-in:
-      // MB_ALLOW_BARGE_IN = false → נטע *לא מקשיבה* כל עוד הבוט באמצע התשובה שלו
-      // (botTurnActive או botSpeaking) וגם בזמן tail קצר אחרי (noListenUntilTs).
-      if (!MB_ALLOW_BARGE_IN) {
-        const now = Date.now();
-        if (botTurnActive || botSpeaking || now < noListenUntilTs) {
-          // מתעלמים מכל אודיו שמגיע בזמן שהבוט מדבר או מיד לאחר מכן
-          return;
-        }
+      // 🔒 חוק barge-in קשיח:
+      // אם MB_ALLOW_BARGE_IN=false → נטע לא מקשיבה כל עוד יש תשובה פעילה
+      // (hasActiveResponse=true) או בזמן שהבוט מדבר בפועל (botSpeaking=true).
+      if (!MB_ALLOW_BARGE_IN && (hasActiveResponse || botSpeaking)) {
+        // מתעלמים מכל אודיו שמגיע בזמן התור של הבוט
+        return;
       }
 
       const oaMsg = {
