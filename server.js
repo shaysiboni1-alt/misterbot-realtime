@@ -686,6 +686,9 @@ wss.on('connection', (connection, req) => {
   // האם יש response פעיל במודל
   let hasActiveResponse = false;
 
+  // דגל: האם זה עדיין "התור של הבוט" – כשזה true ו-barge-in כבוי, אנחנו לא מקשיבים ללקוח
+  let botTurnActive = false;
+
   // האם וובהוק לידים כבר נשלח בשיחה הזו
   let leadWebhookSent = false;
 
@@ -716,6 +719,7 @@ wss.on('connection', (connection, req) => {
     openAiWs.send(JSON.stringify(item));
     openAiWs.send(JSON.stringify({ type: 'response.create' }));
     hasActiveResponse = true;
+    botTurnActive = true;   // מרגע זה – זה "התור של הבוט" (כשbarge-in כבוי לא מקשיבים ללקוח)
     logInfo(tag, `Sending model prompt (${purpose || 'no-tag'})`);
   }
 
@@ -798,7 +802,7 @@ wss.on('connection', (connection, req) => {
         parsedLead.business_name = 'לא רלוונטי';
       }
 
-      // ❗ לוגיקה חדשה: מבחינתך כל ליד אמיתי עם טלפון → וובהוק,
+      // ❗ לוגיקה: מבחינתך כל ליד אמיתי עם טלפון → וובהוק,
       // לא משנה אם lead_type "new" / "existing" / "unknown".
       const isFullLead =
         parsedLead.is_lead === true &&
@@ -923,6 +927,7 @@ wss.on('connection', (connection, req) => {
 
     botSpeaking = false;
     hasActiveResponse = false;
+    botTurnActive = false;
   }
 
   // -----------------------------
@@ -1099,7 +1104,7 @@ wss.on('connection', (connection, req) => {
     switch (type) {
       case 'response.created':
         currentBotText = '';
-        botSpeaking = false;
+        // כאן עדיין לא מדברים, אבל זה חלק מהתור של הבוט – botTurnActive כבר דולק מ-sendModelPrompt
         break;
 
       case 'response.output_text.delta': {
@@ -1143,6 +1148,7 @@ wss.on('connection', (connection, req) => {
       case 'response.audio.done': {
         // האודיו הסתיים – אם זה היה משפט סגירה, מנתקים מיד.
         botSpeaking = false;
+        botTurnActive = false; // סיום "תור הבוט" – עכשיו אפשר שוב להקשיב ללקוח
         if (pendingHangup && !callEnded) {
           const ph = pendingHangup;
           pendingHangup = null;
@@ -1155,6 +1161,7 @@ wss.on('connection', (connection, req) => {
       case 'response.completed': {
         botSpeaking = false;
         hasActiveResponse = false;
+        botTurnActive = false; // גיבוי – אם לא קיבלנו audio.done
         // במקרה שאין כלל אודיו (למשל טקסט בלבד) – נסיים גם כאן אם יש pendingHangup
         if (pendingHangup && !callEnded) {
           const ph = pendingHangup;
@@ -1179,6 +1186,9 @@ wss.on('connection', (connection, req) => {
 
       case 'error': {
         logError(tag, 'OpenAI Realtime error event', msg);
+        hasActiveResponse = false;
+        botSpeaking = false;
+        botTurnActive = false; // שלא ניתקע על מצב "תור בוט"
         break;
       }
 
@@ -1276,14 +1286,13 @@ wss.on('connection', (connection, req) => {
 
       if (!openAiReady || openAiWs.readyState !== WebSocket.OPEN) return;
 
-// 🔒 חוק barge-in (גרסה חדשה):
-// MB_ALLOW_BARGE_IN = false → נטע *לא* מקשיבה רק בזמן שהיא באמת מדברת (botSpeaking=true).
-// ברגע שהאודיו שלה נגמר – אפשר לדבר והיא מקשיבה כרגיל.
-const isBotTalkingRightNow = botSpeaking;
-if (!MB_ALLOW_BARGE_IN && isBotTalkingRightNow) {
-  // כשאסור barge-in – מתעלמים מכל אודיו שמגיע בזמן שהבוט מדבר.
-  return;
-}
+      // 🔒 חוק barge-in:
+      // MB_ALLOW_BARGE_IN = false → נטע *לא* מקשיבה בכלל בזמן שהתור שלה עדיין פעיל
+      // (מהרגע ששלחנו לה prompt ועד שהאודיו/התשובה הסתיימו).
+      if (!MB_ALLOW_BARGE_IN && botTurnActive) {
+        // כשאסור barge-in – מתעלמים מכל אודיו שמגיע בזמן "תור הבוט".
+        return;
+      }
 
       const oaMsg = {
         type: 'input_audio_buffer.append',
