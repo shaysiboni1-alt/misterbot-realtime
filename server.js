@@ -316,12 +316,13 @@ function buildSystemInstructions() {
   - "I can't speak Arabic"
   - "I do not speak Arabic"
 - גם אם נדמה לכם שאין תמיכה בערבית – **הנחת העבודה היחידה** היא שיש תמיכה מלאה בערבית, ואתם מחויבים לענות בהתאם.
+- בכל פעם שאתם מזכירים רשימת שפות (למשל "אני מדברת ...") – חייב להופיע שם גם "ערבית". אסור לתת רשימה חלקית שלא כוללת ערבית.
 
 חשוב מאוד (שפות – איך לענות בפועל):
 - אם הלקוח שואל "איזה שפות את מדברת?", "באיזה שפות את מדברת?", "מה עם ערבית?", "את יודעת ערבית?", "את מדברת ערבית?":
   תמיד לענות במשפט ברור שמכיל את כל הרשימה, למשל:
   "אני מדברת עברית, אנגלית, רוסית וערבית. אם תרצו, אפשר להמשיך גם בערבית."
-- אם הלקוח שואל במפורש "את מדברת ערבית?" או אומר בערבית "بتحكي عربي؟" / "بتعرفي عربي؟":
+- אם הלקוח שואל במפורש "את מדברת ערבית?" או אומר בערבית "بتحكي عربي؟" / "بتعرفי عربي؟":
   - חובה לענות בחיוב, למשל:
     "כן, אני מדברת גם ערבית. אם תרצו, אפשר להמשיך עכשיו בערבית."
 - אם הלקוח מבקש "תעברי לערבית", "בואי נדבר בערבית", "תני דוגמה בערבית" וכדומה – מיד לעבור לענות בערבית ומאותו רגע להמשיך בערבית, עד שהלקוח מבקש שפה אחרת.
@@ -994,7 +995,6 @@ wss.on('connection', (connection, req) => {
 
   // -----------------------------
   // Helper: תזמון סיום שיחה אחרי סגיר – לגרסאות שבהן אנחנו מבקשים מהמודל לומר את משפט הסיום
-  // (טיימר מקסימום, חוסר פעילות וכד')
   // -----------------------------
   function scheduleEndCall(reason, closingMessage) {
     if (callEnded) return;
@@ -1046,7 +1046,7 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: תזמון ניתוק כאשר הבוט כבר אמר את משפט הסיום (אורגני מהמודל)
+  // Helper: תזמון ניתוק כאשר הבוט כבר אמר את משפט הסיום (או כללית משפט פרידה)
   // -----------------------------
   function scheduleHangupAfterBotClosing(reason) {
     if (callEnded) return;
@@ -1076,7 +1076,7 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: בדיקת מילות פרידה של המשתמש – עכשיו גם מפעיל סגירה
+  // Helper: בדיקת מילות פרידה של המשתמש – מפעיל סגירה
   // -----------------------------
   function checkUserGoodbye(transcript) {
     if (!transcript) return;
@@ -1134,19 +1134,59 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: בדיקת משפט סיום של הבוט (MB_CLOSING_SCRIPT)
-  // אם הבוט הגיע אליו – מחכים לסיום האודיו ומנתקים.
+  // Helper: בדיקת משפט סיום של הבוט (גם לפי מילים כלליות)
   // -----------------------------
   function checkBotClosing(botText) {
-    if (!botText || !NORMALIZED_CLOSING_SCRIPT) return;
+    if (!botText) return;
     const norm = normalizeForClosing(botText);
     if (!norm) return;
 
-    // אם משפט הסיום (המנורמל) מופיע בתוך הטקסט של הבוט
-    if (norm.includes(NORMALIZED_CLOSING_SCRIPT) ||
-        NORMALIZED_CLOSING_SCRIPT.includes(norm)) {
-      logInfo(tag, `Detected bot closing phrase in output: "${botText}"`);
-      scheduleHangupAfterBotClosing('bot_closing');
+    // 1. התאמה ל-MB_CLOSING_SCRIPT מה-ENV
+    if (
+      NORMALIZED_CLOSING_SCRIPT &&
+      (norm.includes(NORMALIZED_CLOSING_SCRIPT) ||
+        NORMALIZED_CLOSING_SCRIPT.includes(norm))
+    ) {
+      logInfo(tag, `Detected configured bot closing phrase in output: "${botText}"`);
+      scheduleHangupAfterBotClosing('bot_closing_config');
+      return;
+    }
+
+    // 2. זיהוי כללי: מילים של סיום / פרידה
+    const closingKeywords = [
+      'להתראות',
+      'שיהיה יום טוב',
+      'שיהיה לכם יום טוב',
+      'שיהיה יום נעים',
+      'יום נעים',
+      'יום טוב',
+      'שבוע טוב',
+      'לילה טוב',
+      'goodbye',
+      'bye',
+      'bye bye',
+      'have a nice day'
+    ];
+
+    const keepTalkingHints = [
+      'איך אפשר לעזור',
+      'יש עוד משהו',
+      'רצו לשאול',
+      'רצו לבדוק',
+      'יש לכם עוד',
+      'עוד שאלה',
+      'אפשר לעזור',
+      'איך אוכל לעזור',
+      'איך אני יכולה לעזור',
+      'איך נוכל לעזור'
+    ];
+
+    if (closingKeywords.some((p) => norm.includes(p))) {
+      // אם במשפט יש גם רמזים להמשך שיחה – לא נתייחס כסיום
+      if (!keepTalkingHints.some((p) => norm.includes(p))) {
+        logInfo(tag, `Detected generic closing phrase in bot output: "${botText}"`);
+        scheduleHangupAfterBotClosing('bot_closing_generic');
+      }
     }
   }
 
