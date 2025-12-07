@@ -1276,14 +1276,14 @@ wss.on('connection', (connection, req) => {
 
       if (!openAiReady || openAiWs.readyState !== WebSocket.OPEN) return;
 
-      // 🔒 חוק barge-in:
-      // MB_ALLOW_BARGE_IN = false  → נטע *לא* מקשיבה בכלל בזמן שיש לה תור פעיל (response)
-      // כולל כל זמן שיש אודיו יוצא או שהמודל עדיין באמצע תשובה.
-      const isBotTurn = hasActiveResponse || botSpeaking;
-      if (!MB_ALLOW_BARGE_IN && isBotTurn) {
-        // כשאסור barge-in – מתעלמים מכל אודיו שמגיע בזמן תור של הבוט.
-        return;
-      }
+// 🔒 חוק barge-in (גרסה חדשה):
+// MB_ALLOW_BARGE_IN = false → נטע *לא* מקשיבה רק בזמן שהיא באמת מדברת (botSpeaking=true).
+// ברגע שהאודיו שלה נגמר – אפשר לדבר והיא מקשיבה כרגיל.
+const isBotTalkingRightNow = botSpeaking;
+if (!MB_ALLOW_BARGE_IN && isBotTalkingRightNow) {
+  // כשאסור barge-in – מתעלמים מכל אודיו שמגיע בזמן שהבוט מדבר.
+  return;
+}
 
       const oaMsg = {
         type: 'input_audio_buffer.append',
