@@ -271,6 +271,16 @@ function normalizePhoneNumber(rawPhone, callerNumber) {
 // MB_GENERAL_PROMPT + (אופציונלי) MB_BUSINESS_PROMPT + dynamicBusinessPrompt.
 // אין יותר "פרומפט ענק" קשיח בתוך הקוד.
 //
+
+// חוקים קבועים למודל – כדי שלא ידבר על רעשי רקע ושלא יסיים שיחה לבד לפי מילים
+const EXTRA_BEHAVIOR_RULES = `
+חוקי מערכת קבועים (גבוהים מהפרומפט העסקי):
+1. אל תתייחסי למוזיקה, רעשים או איכות הקו, גם אם את מזהה אותם. התייחסי רק לתוכן מילולי שנשמע כמו דיבור מכוון אלייך. אם לא הבנת משפט – אמרי בקצרה משהו כמו: "לא שמעתי טוב, אפשר לחזור על זה?" בלי לתאר את הרעש.
+2. לעולם אל תחליטי לסיים שיחה רק בגלל מילים שהלקוח אמר (כמו "תודה", "זהו", "לא צריך" וכדומה). המשיכי לענות באופן רגיל עד שמערכת הטלפון מסיימת את השיחה או עד שמבקשים ממך במפורש מתוך ההנחיות הטכניות לומר את משפט הסיום המלא.
+3. כאשר את מתבקשת לסיים שיחה, אמרי את משפט הסיום המדויק שהוגדר במערכת בלבד, בלי להוסיף ובלי לשנות.
+4. שמרי על תשובות קצרות, ברורות וממוקדות (בדרך-כלל עד 2–3 משפטים), אלא אם הלקוח ביקש הסבר מפורט.
+`.trim();
+
 function buildSystemInstructions() {
   const base = (MB_GENERAL_PROMPT || '').trim();
   const staticKb = (MB_BUSINESS_PROMPT || '').trim();
@@ -297,6 +307,9 @@ function buildSystemInstructions() {
 דברו בטון נעים, מקצועי וקצר, ברירת המחדל היא עברית, ותמיד התאימו את עצמכם ללקוח.
 `.trim();
   }
+
+  // מוסיפים תמיד את חוקי ההתנהגות הקבועים
+  instructions += '\n\n' + EXTRA_BEHAVIOR_RULES;
 
   return instructions;
 }
@@ -925,58 +938,6 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: בדיקת מילות פרידה של המשתמש – מפעיל סגירה
-  // -----------------------------
-  function checkUserGoodbye(transcript) {
-    if (!transcript) return;
-    const t = transcript.toLowerCase().trim();
-    if (!t) return;
-
-    // ❗ מעכשיו – רק בעברית. הורדנו goodbye / bye-bye באנגלית
-    const goodbyePatterns = [
-      'זהו',
-      'זהו זה',
-      'זה הכל',
-      'זה הכול',
-      'סיימנו',
-      'מספיק לעכשיו',
-      'להתראות',
-      'להתראות לך',
-      'ביי',
-      'ביי ביי',
-      'יאללה ביי',
-      'יאללה, ביי',
-      'תודה רבה',
-      'תודה, זהו',
-      'תודה, זה הכל',
-      'תודה זה הכל',
-      'תודה זהו',
-      'טוב תודה',
-      'טוב, תודה',
-      'לא תודה',
-      'לא, תודה',
-      // 'לא צריך',  // ❌ הוסר – עושה יותר מדי false positives באמצע משפטים
-      'לא צריך תודה',
-      'אין, תודה',
-      'אין תודה',
-      'זהו תודה',
-      'זה הכל תודה',
-      'שיהיה יום טוב',
-      'שיהיה לכם יום טוב',
-      'לילה טוב',
-      'שבוע טוב'
-    ];
-
-    if (goodbyePatterns.some((p) => t.includes(p))) {
-      logInfo(
-        tag,
-        `Detected user goodbye phrase: "${transcript}" – scheduling graceful closing.`
-      );
-      scheduleEndCall('user_goodbye', MB_CLOSING_SCRIPT);
-    }
-  }
-
-  // -----------------------------
   // Helper: בדיקת משפט סיום של הבוט – **רק** לפי MB_CLOSING_SCRIPT מה-ENV
   // -----------------------------
   function checkBotClosing(botText) {
@@ -1144,7 +1105,7 @@ wss.on('connection', (connection, req) => {
         if (t) {
           t = t.replace(/\s+/g, ' ').replace(/\s+([,.:;!?])/g, '$1');
           conversationLog.push({ from: 'user', text: t });
-          checkUserGoodbye(t);
+          // ❗ אין יותר ניתוק לפי מילים – לא קוראים ל-checkUserGoodbye
         }
         break;
       }
