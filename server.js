@@ -297,7 +297,16 @@ function buildSystemInstructions() {
 
 חשוב מאוד (שפות):
 - אתם יודעים לדבר ולהבין **עברית, אנגלית, רוסית וערבית** באופן מלא.
-- אסור לכם בכל מצב ובכל ניסוח לומר שאתם לא מדברים ערבית, שאין אפשרות לדבר בערבית, או שאתם מוגבלים רק לעברית/אנגלית/רוסית.
+- זהו חוק עליון: **אסור בכל מצב ובשום ניסוח לומר שאין אפשרות לדבר ערבית**.
+  - אסור לומר משפטים כמו:
+    - "אני לא מדברת ערבית"
+    - "אין לי אפשרות לדבר ערבית"
+    - "אני לא יכולה לדבר בערבית"
+    - "I can't speak Arabic"
+    - "I do not speak Arabic"
+    - "Arabic is not supported"
+  - גם לא ניסוחים דומים באותה משמעות.
+- אם אינכם בטוחים – עדיף לומר שאתם כן מדברים ערבית ולהציע לעבור לערבית, מאשר לומר שאין אפשרות לדבר ערבית.
 - אם הלקוח שואל "איזה שפות את מדברת?", "באיזה שפות את מדברת?", "מה עם ערבית?", "את יודעת ערבית?", "את מדברת ערבית?":
   תמיד לענות במשפט ברור שמכיל את כל הרשימה, למשל:
   "אני מדברת עברית, אנגלית, רוסית וערבית. אם תרצו, אפשר להמשיך גם בערבית."
@@ -407,9 +416,17 @@ ${langsTxt}
 - אסור לומר "אני לא יכולה לעשות סימולציה" או "אני רק אחבר אתכם לנציג" רק בגלל שביקשו דוגמה. רק אם הלקוח מבקש במפורש נציג אנושי – אפשר להציע חזרה מנציג.
 
 סיום שיחה:
-- כאשר אתם באמת מסיימים שיחה עם הלקוח, השתמשו **באותו משפט סיום קבוע** הבא או בניסוח כמעט זהה:
-  "${MB_CLOSING_SCRIPT}"
-- אחרי המשפט הזה אין יותר שיחה חדשה – זהו סיום השיחה בפועל.
+- אם הלקוח אומר משפט קצר וברור של סיום, כמו:
+  "זהו", "זהו זה", "זה הכל", "זה הכול", "סיימנו", "מספיק לעכשיו",
+  "לא, זהו", "לא, זה הכל", "לא, תודה זה הכל",
+  "להתראות", "יאללה ביי", "ביי ביי", "ביי",
+  "טוב, תודה, זהו", "טוב תודה, זה הכל",
+  "שיהיה יום טוב", "לילה טוב", "שבוע טוב",
+  "goodbye", "bye", "bye bye", "ok thanks", "that's all" –
+  להבין שהשיחה מסתיימת.
+- במקרה כזה, המערכת *תגרום* לך לומר את משפט הסיום הקבוע שהוגדר (MB_CLOSING_SCRIPT),
+  ורק אחרי שנאמר משפט הסיום הזה במלואו, השיחה תנותק אוטומטית.
+- אסור לנתק באמצע שיחה שבה עדיין יש שאלות או המשך דיאלוג – רק אחרי משפט סיום קצר וברור.
 
 ${businessKb}
 
@@ -768,22 +785,22 @@ wss.on('connection', (connection, req) => {
   // Helper: שליחת וובהוק לידים – פעם אחת בלבד, ורק אם זה ליד מלא
   // -----------------------------
   async function sendLeadWebhook(reason, closingMessage) {
-    const tag = 'LeadWebhook';
+    const tagWebhook = 'LeadWebhook';
 
     if (!MB_ENABLE_LEAD_CAPTURE || !MB_WEBHOOK_URL) {
-      logDebug(tag, 'Lead capture disabled or no MB_WEBHOOK_URL – skipping webhook.');
+      logDebug(tagWebhook, 'Lead capture disabled or no MB_WEBHOOK_URL – skipping webhook.');
       return;
     }
 
     if (leadWebhookSent) {
-      logDebug(tag, 'Lead webhook already sent for this call – skipping.');
+      logDebug(tagWebhook, 'Lead webhook already sent for this call – skipping.');
       return;
     }
 
     try {
       // אם משום מה callerNumber ריק – נשלוף אותו מטוויליו לפי callSid (אותו From של {{trigger.call.From}})
       if (!callerNumber && callSid) {
-        const resolved = await fetchCallerNumberFromTwilio(callSid, tag);
+        const resolved = await fetchCallerNumberFromTwilio(callSid, tagWebhook);
         if (resolved) {
           callerNumber = resolved;
         }
@@ -792,7 +809,7 @@ wss.on('connection', (connection, req) => {
       let parsedLead = await extractLeadFromConversation(conversationLog);
 
       if (!parsedLead || typeof parsedLead !== 'object') {
-        logInfo(tag, 'No parsed lead object – skipping webhook (לא ליד מלא).');
+        logInfo(tagWebhook, 'No parsed lead object – skipping webhook (לא ליד מלא).');
         return;
       }
 
@@ -842,7 +859,7 @@ wss.on('connection', (connection, req) => {
 
       // 👉 שולחים וובהוק רק אם זה "ליד מלא" (יש טלפון והוא באמת ליד).
       if (!isFullLead) {
-        logInfo(tag, 'Parsed lead is NOT full lead – webhook will NOT be sent.', {
+        logInfo(tagWebhook, 'Parsed lead is NOT full lead – webhook will NOT be sent.', {
           is_lead: parsedLead.is_lead,
           lead_type: parsedLead.lead_type,
           phone_number: parsedLead.phone_number
@@ -885,8 +902,8 @@ wss.on('connection', (connection, req) => {
         isFullLead
       };
 
-      logInfo(tag, `Sending lead webhook to ${MB_WEBHOOK_URL}`);
-      logInfo(tag, 'Lead webhook short summary', {
+      logInfo(tagWebhook, `Sending lead webhook to ${MB_WEBHOOK_URL}`);
+      logInfo(tagWebhook, 'Lead webhook short summary', {
         phone_number: finalPhoneNumber,
         CALLERID: finalCallerId
       });
@@ -901,12 +918,12 @@ wss.on('connection', (connection, req) => {
       });
 
       if (!res.ok) {
-        logError(tag, `Lead webhook HTTP ${res.status}`, await res.text());
+        logError(tagWebhook, `Lead webhook HTTP ${res.status}`, await res.text());
       } else {
-        logInfo(tag, `Lead webhook delivered successfully. status=${res.status}`);
+        logInfo(tagWebhook, `Lead webhook delivered successfully. status=${res.status}`);
       }
     } catch (err) {
-      logError(tag, 'Error sending lead webhook', err);
+      logError(tagWebhook, 'Error sending lead webhook', err);
     }
   }
 
@@ -1016,83 +1033,90 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: בדיקת מילות פרידה של המשתמש
-  //  ⚠️ החל מעכשיו – זיהוי בלבד ללוג, ללא ניתוק!
+  // Helper: זיהוי "משפט סיום חזק" של המשתמש
   // -----------------------------
-  function checkUserGoodbye(transcript) {
-    if (!transcript) return;
-    const t = transcript.toLowerCase().trim();
-    if (!t) return;
+  function isStrongGoodbyeUtterance(transcript) {
+    if (!transcript) return false;
 
-    const goodbyePatterns = [
+    // נורמליזציה קלה – בלי סימני פיסוק וריבוי רווחים
+    let t = transcript
+      .replace(/[.,!?…]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+
+    if (!t) return false;
+
+    // סט של משפטים מאוד קצרים – רק סיום, בלי שום תוספות
+    const exactSet = new Set([
       'זהו',
       'זהו זה',
       'זה הכל',
       'זה הכול',
       'סיימנו',
       'מספיק לעכשיו',
-      'להתראות',
-      'להתראות לך',
-      'ביי',
-      'ביי ביי',
-      'יאללה ביי',
-      'יאללה, ביי',
-      'תודה רבה',
-      'תודה, זהו',
-      'תודה, זה הכל',
-      'תודה זה הכל',
-      'תודה זהו',
-      'טוב תודה',
-      'טוב, תודה',
+      'לא זהו',
+      'לא זה הכל',
+      'לא זה הכול',
       'לא תודה',
-      'לא, תודה',
+      'לא תודה זהו',
+      'לא תודה זה הכל',
       'לא צריך',
       'לא צריך תודה',
-      'אין, תודה',
-      'אין תודה',
-      'זהו תודה',
-      'זה הכל תודה',
-      'שיהיה יום טוב',
-      'שיהיה לכם יום טוב',
-      'לילה טוב',
-      'שבוע טוב',
-      'goodbye',
+      'להתראות',
+      'יאללה ביי',
+      'ביי',
+      'ביי ביי',
       'bye',
       'bye bye',
+      'goodbye',
       'ok thanks',
-      "that's all",
-      'that is all'
+      "that's all"
+    ]);
+
+    if (exactSet.has(t)) return true;
+
+    // תבניות קצרות כמו "טוב תודה, זהו", "טוב תודה, זה הכל"
+    const patterns = [
+      /^טוב תודה( זהו| זה הכל| זה הכול)?$/,
+      /^בסדר תודה( זהו| זה הכל| זה הכול)?$/,
+      /^זהו תודה$/,
+      /^זה הכל תודה$/,
+      /^זה הכול תודה$/,
+      /^טוב זהו$/,
+      /^טוב זה הכל$/,
+      /^טוב זה הכול$/,
+      /^אין תודה$/,
+      /^אין, תודה$/
     ];
 
-    if (goodbyePatterns.some((p) => t.includes(p))) {
-      // רק לוג – בלי scheduleEndCall
-      logInfo(tag, `Detected user goodbye phrase (LOG ONLY, NO HANGUP): "${transcript}"`);
-    }
+    if (patterns.some((re) => re.test(t))) return true;
+
+    // אם הטקסט ארוך (יותר מ~7 מילים) – לא נחשב כסיום חזק
+    const wordsCount = t.split(' ').length;
+    if (wordsCount > 7) return false;
+
+    return false;
   }
 
   // -----------------------------
-  // Helper: בדיקת משפט סגירה של הבוט – *זה* הטריגר לניתוק
+  // Helper: בדיקת מילות פרידה של המשתמש
   // -----------------------------
-  function checkBotClosing(text) {
-    if (!text) return;
+  function checkUserGoodbye(transcript) {
+    if (!transcript || callEnded || pendingHangup) return;
 
-    // נורמליזציה קלה – הורדת רווחים כפולים וסימני פיסוק חיצוניים
-    const normalize = (s) =>
-      s
-        .toLowerCase()
-        .trim()
-        .replace(/\s+/g, ' ');
-
-    const botTextNorm = normalize(text);
-    const closingNorm = normalize(MB_CLOSING_SCRIPT || '');
-
-    if (!closingNorm) return;
-
-    // ניתוק רק אם הבוט באמת אמר את משפט הסגירה (או משהו שכולל אותו)
-    if (botTextNorm.includes(closingNorm)) {
-      logInfo(tag, `Detected bot closing phrase in output: "${text}"`);
-      // עכשיו מותר לנתק – דרך הסגיר של הבוט בלבד
-      scheduleEndCall('bot_closing', MB_CLOSING_SCRIPT);
+    if (isStrongGoodbyeUtterance(transcript)) {
+      logInfo(
+        tag,
+        `Detected STRONG user goodbye utterance – scheduling endCall: "${transcript}"`
+      );
+      scheduleEndCall('user_goodbye', MB_CLOSING_SCRIPT);
+    } else {
+      // תיעוד בלבד – בלי שום ניתוק, כדי שלא יהיו ניתוקי שווא
+      logInfo(
+        tag,
+        `Detected possible goodbye phrase (LOG ONLY, NO HANGUP): "${transcript}"`
+      );
     }
   }
 
@@ -1154,260 +1178,4 @@ wss.on('connection', (connection, req) => {
   openAiWs.on('message', (data) => {
     let msg;
     try {
-      msg = JSON.parse(data.toString());
-    } catch (err) {
-      logError(tag, 'Failed to parse OpenAI WS message', err);
-      return;
-    }
-
-    const type = msg.type;
-
-    switch (type) {
-      case 'response.created':
-        currentBotText = '';
-        // עדיין חלק מתור הבוט – botTurnActive דולק מ-sendModelPrompt
-        break;
-
-      case 'response.output_text.delta': {
-        const delta = msg.delta || '';
-        if (delta) currentBotText += delta;
-        break;
-      }
-
-      case 'response.audio_transcript.delta': {
-        const delta = msg.delta || '';
-        if (delta) currentBotText += delta;
-        break;
-      }
-
-      case 'response.output_text.done':
-      case 'response.audio_transcript.done': {
-        const text = (currentBotText || '').trim();
-        if (text) {
-          conversationLog.push({ from: 'bot', text });
-          // כאן בודקים האם הבוט אמר את משפט הסגירה
-          checkBotClosing(text);
-        }
-        currentBotText = '';
-        break;
-      }
-
-      // שליחת אודיו לטוויליו
-      case 'response.audio.delta': {
-        const b64 = msg.delta;
-        if (!b64 || !streamSid) break;
-        botSpeaking = true;
-
-        // כל פעם שיש אודיו חדש – מאריכים מעט את חלון ה"לא מקשיבים"
-        const now = Date.now();
-        noListenUntilTs = now + MB_NO_BARGE_TAIL_MS;
-
-        if (connection.readyState === WebSocket.OPEN) {
-          const twilioMsg = {
-            event: 'media',
-            streamSid,
-            media: { payload: b64 }
-          };
-          connection.send(JSON.stringify(twilioMsg));
-        }
-        break;
-      }
-
-      case 'response.audio.done': {
-        // האודיו הסתיים – עדיין יש לנו tail קטן שבו לא מקשיבים (noListenUntilTs)
-        botSpeaking = false;
-        botTurnActive = false;
-        if (pendingHangup && !callEnded) {
-          const ph = pendingHangup;
-          pendingHangup = null;
-          logInfo(tag, 'Closing audio finished, ending call now.');
-          endCall(ph.reason, ph.closingMessage);
-        }
-        break;
-      }
-
-      case 'response.completed': {
-        botSpeaking = false;
-        hasActiveResponse = false;
-        botTurnActive = false;
-        // במקרה שאין כלל אודיו (למשל טקסט בלבד) – נסיים גם כאן אם יש pendingHangup
-        if (pendingHangup && !callEnded) {
-          const ph = pendingHangup;
-          pendingHangup = null;
-          logInfo(tag, 'Response completed for closing, ending call now.');
-          endCall(ph.reason, ph.closingMessage);
-        }
-        break;
-      }
-
-      case 'conversation.item.input_audio_transcription.completed': {
-        const transcriptRaw = msg.transcript || '';
-        let t = transcriptRaw.trim();
-        if (t) {
-          // ניקוי תמלול: רווחים כפולים, רווחים לפני סימני פיסוק
-          t = t.replace(/\s+/g, ' ').replace(/\s+([,.:;!?])/g, '$1');
-          conversationLog.push({ from: 'user', text: t });
-          // זיהוי מילים בעייתיות – אבל רק ללוג, לא לניתוק
-          checkUserGoodbye(t);
-        }
-        break;
-      }
-
-      case 'error': {
-        logError(tag, 'OpenAI Realtime error event', msg);
-        hasActiveResponse = false;
-        botSpeaking = false;
-        botTurnActive = false;
-        noListenUntilTs = 0;
-        break;
-      }
-
-      default:
-        break;
-    }
-  });
-
-  openAiWs.on('close', () => {
-    openAiClosed = true;
-    logInfo(tag, 'OpenAI WS closed.');
-    if (!callEnded) {
-      endCall('openai_ws_closed', MB_CLOSING_SCRIPT);
-    }
-  });
-
-  openAiWs.on('error', (err) => {
-    logError(tag, 'OpenAI WS error', err);
-    if (!openAiClosed) {
-      openAiClosed = true;
-      openAiWs.close();
-    }
-    if (!callEnded) {
-      endCall('openai_ws_error', MB_CLOSING_SCRIPT);
-    }
-  });
-
-  // -----------------------------
-  // Twilio Media Stream handlers
-  // -----------------------------
-  connection.on('message', (data) => {
-    let msg;
-    try {
-      msg = JSON.parse(data.toString());
-    } catch (err) {
-      logError(tag, 'Failed to parse Twilio WS message', err);
-      return;
-    }
-
-    const event = msg.event;
-
-    if (event === 'start') {
-      streamSid = msg.start?.streamSid || null;
-      callSid = msg.start?.callSid || null;
-      // כאן אנחנו אוספים את מה ששלחנו מ-/twilio-voice => זה אותו ערך של {{trigger.call.From}}
-      callerNumber = msg.start?.customParameters?.caller || null;
-      callStartTs = Date.now();
-      lastMediaTs = Date.now();
-
-      logInfo(
-        tag,
-        `Twilio stream started. streamSid=${streamSid}, callSid=${callSid}, caller=${callerNumber}`
-      );
-
-      // Idle checker
-      idleCheckInterval = setInterval(() => {
-        const now = Date.now();
-        const sinceMedia = now - lastMediaTs;
-
-        if (!idleWarningSent && sinceMedia >= MB_IDLE_WARNING_MS && !callEnded) {
-          sendIdleWarningIfNeeded();
-        }
-        if (!idleHangupScheduled && sinceMedia >= MB_IDLE_HANGUP_MS && !callEnded) {
-          idleHangupScheduled = true;
-          logInfo(tag, 'Idle timeout reached, scheduling endCall.');
-          scheduleEndCall('idle_timeout', MB_CLOSING_SCRIPT);
-        }
-      }, 1000);
-
-      // Max call duration + התראה לפני
-      if (MB_MAX_CALL_MS > 0) {
-        if (
-          MB_MAX_WARN_BEFORE_MS > 0 &&
-          MB_MAX_CALL_MS > MB_MAX_WARN_BEFORE_MS
-        ) {
-          maxCallWarningTimeout = setTimeout(() => {
-            const t =
-              'אנחנו מתקרבים לסיום הזמן לשיחה הזאת. אם תרצו להתקדם, אפשר עכשיו לסכם ולהשאיר פרטים.';
-            sendModelPrompt(
-              `תני ללקוח משפט קצר בסגנון הבא (אפשר לשנות קצת): "${t}"`,
-              'max_call_warning'
-            );
-          }, MB_MAX_CALL_MS - MB_MAX_WARN_BEFORE_MS);
-        }
-
-        maxCallTimeout = setTimeout(() => {
-          logInfo(tag, 'Max call duration reached, scheduling endCall.');
-          scheduleEndCall('max_call_duration', MB_CLOSING_SCRIPT);
-        }, MB_MAX_CALL_MS);
-      }
-    } else if (event === 'media') {
-      lastMediaTs = Date.now();
-      const payload = msg.media?.payload;
-      if (!payload) return;
-
-      if (!openAiReady || openAiWs.readyState !== WebSocket.OPEN) return;
-
-      // 🔒 חוק barge-in:
-      // MB_ALLOW_BARGE_IN = false → נטע *לא מקשיבה* כל עוד הבוט באמצע התשובה שלו
-      // (botTurnActive או botSpeaking) וגם בזמן tail קצר אחרי (noListenUntilTs).
-      if (!MB_ALLOW_BARGE_IN) {
-        const now = Date.now();
-        if (botTurnActive || botSpeaking || now < noListenUntilTs) {
-          // מתעלמים מכל אודיו שמגיע בזמן שהבוט מדבר או מיד לאחר מכן
-          return;
-        }
-      }
-
-      const oaMsg = {
-        type: 'input_audio_buffer.append',
-        audio: payload
-      };
-      openAiWs.send(JSON.stringify(oaMsg));
-    } else if (event === 'stop') {
-      logInfo(tag, 'Twilio stream stopped.');
-      twilioClosed = true;
-      if (!callEnded) {
-        endCall('twilio_stop', MB_CLOSING_SCRIPT);
-      }
-    } else {
-      // events אחרים (mark וכו') – מתעלמים
-    }
-  });
-
-  connection.on('close', () => {
-    twilioClosed = true;
-    logInfo(tag, 'Twilio WS closed.');
-    if (!callEnded) {
-      endCall('twilio_ws_closed', MB_CLOSING_SCRIPT);
-    }
-  });
-
-  connection.on('error', (err) => {
-    twilioClosed = true;
-    logError(tag, 'Twilio WS error', err);
-    if (!callEnded) {
-      endCall('twilio_ws_error', MB_CLOSING_SCRIPT);
-    }
-  });
-});
-
-// -----------------------------
-// Start server
-// -----------------------------
-server.listen(PORT, () => {
-  console.log(`✅ MisterBot Realtime Voice Bot running on port ${PORT}`);
-  // ריענון KB דינאמי פעם אחת בהפעלה
-  refreshDynamicBusinessPrompt('Startup').catch((err) =>
-    console.error('[ERROR][DynamicKB] initial load failed', err)
-  );
-  // אין יותר setInterval – מעכשיו ריענון KB קורה רק אחרי שיחות (PostCall + Throttling)
-});
+      msg = JSON
