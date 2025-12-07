@@ -932,6 +932,7 @@ wss.on('connection', (connection, req) => {
     const t = transcript.toLowerCase().trim();
     if (!t) return;
 
+    // ❗ מעכשיו – רק בעברית. הורדנו goodbye / bye-bye באנגלית
     const goodbyePatterns = [
       'זהו',
       'זהו זה',
@@ -963,13 +964,7 @@ wss.on('connection', (connection, req) => {
       'שיהיה יום טוב',
       'שיהיה לכם יום טוב',
       'לילה טוב',
-      'שבוע טוב',
-      'goodbye',
-      'bye',
-      'bye bye',
-      'ok thanks',
-      "that's all",
-      'that is all'
+      'שבוע טוב'
     ];
 
     if (goodbyePatterns.some((p) => t.includes(p))) {
@@ -1066,7 +1061,12 @@ wss.on('connection', (connection, req) => {
 
     switch (type) {
       case 'response.created':
+        // כל response חדש – מתחיל "תור" של הבוט
         currentBotText = '';
+        hasActiveResponse = true;
+        botTurnActive = true;
+        botSpeaking = false;
+        noListenUntilTs = Date.now() + MB_NO_BARGE_TAIL_MS;
         break;
 
       case 'response.output_text.delta': {
@@ -1254,6 +1254,12 @@ wss.on('connection', (connection, req) => {
       if (!MB_ALLOW_BARGE_IN) {
         const now = Date.now();
         if (botTurnActive || botSpeaking || now < noListenUntilTs) {
+          logDebug('BargeIn', 'Ignoring media because bot is speaking / turn active', {
+            botTurnActive,
+            botSpeaking,
+            now,
+            noListenUntilTs
+          });
           return;
         }
       }
