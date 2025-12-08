@@ -981,12 +981,19 @@ wss.on('connection', (connection, req) => {
     if (!MB_ALLOW_BARGE_IN) return;
     if (callEnded) return;
 
+    // ❗ אל תעשה barge-in על הפתיח הראשון – עד שלא היה לפחות משפט אחד של הלקוח
+    if (conversationLog.length === 0) {
+      logDebug('BargeIn', 'Skip cancel during opening greeting (no user turns yet).');
+      return;
+    }
+
     // חייב להיות response פעיל וגם responseId לפני שננסה לבטל
     if (!hasActiveResponse || !currentResponseId) {
-      logDebug('BargeIn', 'Skip cancel – no active responseId / hasActiveResponse=false', {
-        hasActiveResponse,
-        currentResponseId
-      });
+      logDebug(
+        'BargeIn',
+        'Skip cancel – no active responseId / hasActiveResponse=false',
+        { hasActiveResponse, currentResponseId }
+      );
       return;
     }
 
