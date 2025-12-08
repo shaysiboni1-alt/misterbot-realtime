@@ -617,6 +617,10 @@ wss.on('connection', (connection, req) => {
   // האם וובהוק לידים כבר נשלח בשיחה הזו
   let leadWebhookSent = false;
 
+  // מזהה ה-response הנוכחי במודל (לצורך cancel)
+  let currentResponseId = null;
+  let bargeInAlreadyFiredForThisResponse = false;
+
   // -----------------------------
   // Helper: שליחת טקסט למודל עם הגנה על response כפול
   // -----------------------------
@@ -971,6 +975,48 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
+  // Helper: barge-in אגרסיבי – מבטל את התגובה הנוכחית
+  // -----------------------------
+  function handleBargeInIfNeeded() {
+    if (!MB_ALLOW_BARGE_IN) return;
+    if (callEnded) return;
+
+    // רק אם יש כרגע תגובה פעילה / דיבור של הבוט
+    if (!hasActiveResponse && !botSpeaking && !botTurnActive) return;
+
+    if (bargeInAlreadyFiredForThisResponse) return;
+    bargeInAlreadyFiredForThisResponse = true;
+
+    logInfo('BargeIn', 'User barge-in detected – cancelling current bot response.');
+
+    // ביטול response במודל (אם יש לנו responseId – נשתמש בו)
+    if (openAiWs.readyState === WebSocket.OPEN) {
+      const cancelEvent = currentResponseId
+        ? { type: 'response.cancel', response_id: currentResponseId }
+        : { type: 'response.cancel' };
+
+      try {
+        openAiWs.send(JSON.stringify(cancelEvent));
+      } catch (err) {
+        logError('BargeIn', 'Error sending response.cancel to OpenAI', err);
+      }
+    }
+
+    // איפוס מצב הבוט כדי לאפשר תגובה חדשה
+    hasActiveResponse = false;
+    botSpeaking = false;
+    botTurnActive = false;
+    noListenUntilTs = 0;
+    currentResponseId = null;
+
+    // אם הייתה סגירת שיחה בתהליך (pendingHangup) ספציפית מסגירה של הבוט – ננקה אותה
+    if (pendingHangup && pendingHangup.reason && pendingHangup.reason.startsWith('bot_closing')) {
+      logDebug('BargeIn', 'Clearing pending hangup due to barge-in during bot closing.');
+      pendingHangup = null;
+    }
+  }
+
+  // -----------------------------
   // OpenAI WS handlers
   // -----------------------------
   openAiWs.on('open', () => {
@@ -1021,14 +1067,20 @@ wss.on('connection', (connection, req) => {
     const type = msg.type;
 
     switch (type) {
-      case 'response.created':
+      case 'response.created': {
         // כל response חדש – מתחיל "תור" של הבוט
         currentBotText = '';
         hasActiveResponse = true;
         botTurnActive = true;
         botSpeaking = false;
         noListenUntilTs = Date.now() + MB_NO_BARGE_TAIL_MS;
+
+        // שמירת מזהה response לצורך ביטול מדויק
+        const resp = msg.response || {};
+        currentResponseId = resp.id || null;
+        bargeInAlreadyFiredForThisResponse = false;
         break;
+      }
 
       case 'response.output_text.delta': {
         const delta = msg.delta || '';
@@ -1077,6 +1129,9 @@ wss.on('connection', (connection, req) => {
       case 'response.audio.done': {
         botSpeaking = false;
         botTurnActive = false;
+        currentResponseId = null;
+        bargeInAlreadyFiredForThisResponse = false;
+
         if (pendingHangup && !callEnded) {
           const ph = pendingHangup;
           pendingHangup = null;
@@ -1090,6 +1145,9 @@ wss.on('connection', (connection, req) => {
         botSpeaking = false;
         hasActiveResponse = false;
         botTurnActive = false;
+        currentResponseId = null;
+        bargeInAlreadyFiredForThisResponse = false;
+
         if (pendingHangup && !callEnded) {
           const ph = pendingHangup;
           pendingHangup = null;
@@ -1116,6 +1174,8 @@ wss.on('connection', (connection, req) => {
         botSpeaking = false;
         botTurnActive = false;
         noListenUntilTs = 0;
+        currentResponseId = null;
+        bargeInAlreadyFiredForThisResponse = false;
         break;
       }
 
@@ -1211,9 +1271,10 @@ wss.on('connection', (connection, req) => {
 
       if (!openAiReady || openAiWs.readyState !== WebSocket.OPEN) return;
 
-      // 🔒 barge-in:
+      const now = Date.now();
+
+      // 🔒 אם אין barge-in – אנחנו חוסמים מדיה כשנטע מדברת / זה התור שלה
       if (!MB_ALLOW_BARGE_IN) {
-        const now = Date.now();
         if (botTurnActive || botSpeaking || now < noListenUntilTs) {
           logDebug('BargeIn', 'Ignoring media because bot is speaking / turn active', {
             botTurnActive,
@@ -1222,6 +1283,12 @@ wss.on('connection', (connection, req) => {
             noListenUntilTs
           });
           return;
+        }
+      } else {
+        // ✔ MB_ALLOW_BARGE_IN = true → אם הלקוח מדבר על נטע בזמן שהיא מדברת – נבצע barge-in אגרסיבי
+        const isBargeNow = botTurnActive || botSpeaking || now < noListenUntilTs;
+        if (isBargeNow) {
+          handleBargeInIfNeeded();
         }
       }
 
