@@ -981,20 +981,23 @@ wss.on('connection', (connection, req) => {
     if (!MB_ALLOW_BARGE_IN) return;
     if (callEnded) return;
 
-    // רק אם יש כרגע תגובה פעילה / דיבור של הבוט
-    if (!hasActiveResponse && !botSpeaking && !botTurnActive) return;
+    // חייב להיות response פעיל וגם responseId לפני שננסה לבטל
+    if (!hasActiveResponse || !currentResponseId) {
+      logDebug('BargeIn', 'Skip cancel – no active responseId / hasActiveResponse=false', {
+        hasActiveResponse,
+        currentResponseId
+      });
+      return;
+    }
 
     if (bargeInAlreadyFiredForThisResponse) return;
     bargeInAlreadyFiredForThisResponse = true;
 
     logInfo('BargeIn', 'User barge-in detected – cancelling current bot response.');
 
-    // ביטול response במודל (אם יש לנו responseId – נשתמש בו)
+    // ביטול response במודל
     if (openAiWs.readyState === WebSocket.OPEN) {
-      const cancelEvent = currentResponseId
-        ? { type: 'response.cancel', response_id: currentResponseId }
-        : { type: 'response.cancel' };
-
+      const cancelEvent = { type: 'response.cancel', response_id: currentResponseId };
       try {
         openAiWs.send(JSON.stringify(cancelEvent));
       } catch (err) {
@@ -1009,7 +1012,7 @@ wss.on('connection', (connection, req) => {
     noListenUntilTs = 0;
     currentResponseId = null;
 
-    // אם הייתה סגירת שיחה בתהליך (pendingHangup) ספציפית מסגירה של הבוט – ננקה אותה
+    // אם הייתה סגירת שיחה בתהליך (pendingHangup) מסגירה של הבוט – ננקה אותה
     if (pendingHangup && pendingHangup.reason && pendingHangup.reason.startsWith('bot_closing')) {
       logDebug('BargeIn', 'Clearing pending hangup due to barge-in during bot closing.');
       pendingHangup = null;
@@ -1075,10 +1078,11 @@ wss.on('connection', (connection, req) => {
         botSpeaking = false;
         noListenUntilTs = Date.now() + MB_NO_BARGE_TAIL_MS;
 
-        // שמירת מזהה response לצורך ביטול מדויק
         const resp = msg.response || {};
         currentResponseId = resp.id || null;
         bargeInAlreadyFiredForThisResponse = false;
+
+        logDebug(tag, 'response.created', { currentResponseId });
         break;
       }
 
@@ -1169,13 +1173,17 @@ wss.on('connection', (connection, req) => {
       }
 
       case 'error': {
+        // שגיאות לוגיות מה-API (כולל response_cancel_not_active) – לא נופלים מהשיחה
         logError(tag, 'OpenAI Realtime error event', msg);
-        hasActiveResponse = false;
-        botSpeaking = false;
-        botTurnActive = false;
-        noListenUntilTs = 0;
-        currentResponseId = null;
-        bargeInAlreadyFiredForThisResponse = false;
+        if (msg.error && msg.error.code === 'response_cancel_not_active') {
+          // במקרה הזה זה רק אומר שביטלנו מאוחר מדי – מתעלמים ומאפסים סטייט
+          hasActiveResponse = false;
+          currentResponseId = null;
+          bargeInAlreadyFiredForThisResponse = false;
+          botTurnActive = false;
+          botSpeaking = false;
+          noListenUntilTs = 0;
+        }
         break;
       }
 
@@ -1193,7 +1201,7 @@ wss.on('connection', (connection, req) => {
   });
 
   openAiWs.on('error', (err) => {
-    logError(tag, 'OpenAI WS error', err);
+    logError(tag, 'OpenAI WS socket error', err);
     if (!openAiClosed) {
       openAiClosed = true;
       openAiWs.close();
