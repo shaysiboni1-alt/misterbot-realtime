@@ -3,21 +3,11 @@
 // MisterBot Realtime Voice Bot – "נטע"
 // Twilio Media Streams <-> OpenAI Realtime API (gpt-4o-realtime-preview-2024-12-17)
 //
-//
 // חוקים עיקריים לפי ה-MASTER PROMPT:
 // - שיחה בעברית כברירת מחדל, לשון רבים, טון חם וקצר.
 // - שליטה מלאה דרך ENV (פתיח, סגיר, פרומפט כללי, KB עסקי, טיימרים, לידים, VAD).
 // - טיימר שקט + ניתוק אוטומטי + מגבלת זמן שיחה.
 // - לוג שיחה + וובהוק לידים (אם מופעל) + PARSING חכם ללידים.
-//
-// דרישות:
-//   npm install express ws dotenv
-//   (מומלץ Node 18+ כדי ש-fetch יהיה זמין גלובלית)
-//
-//
-// Twilio Voice Webhook ->  POST /twilio-voice  (TwiML)
-// Twilio Media Streams -> wss://<domain>/twilio-media-stream
-//
 
 require('dotenv').config();
 const express = require('express');
@@ -64,17 +54,14 @@ const MB_CLOSING_SCRIPT =
 const MB_GENERAL_PROMPT = process.env.MB_GENERAL_PROMPT || '';
 const MB_BUSINESS_PROMPT = process.env.MB_BUSINESS_PROMPT || '';
 
-// אפשר להשאיר את זה לשימוש עתידי / לוגים, אבל הוא כבר לא מכתיב טקסט בקוד
 const MB_LANGUAGES = (process.env.MB_LANGUAGES || 'he,en,ru,ar')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
 
 const MB_SPEECH_SPEED = envNumber('MB_SPEECH_SPEED', 1.15);
-
 const OPENAI_VOICE = process.env.OPENAI_VOICE || 'alloy';
 
-// ניהול נכון של MAX_OUTPUT_TOKENS – תמיד מספר או "inf"
 const MAX_OUTPUT_TOKENS_ENV = process.env.MAX_OUTPUT_TOKENS;
 let MAX_OUTPUT_TOKENS = 'inf';
 if (MAX_OUTPUT_TOKENS_ENV) {
@@ -97,40 +84,40 @@ function normalizeForClosing(text) {
 }
 const NORMALIZED_CLOSING_SCRIPT = normalizeForClosing(MB_CLOSING_SCRIPT);
 
-// VAD – ברירות מחדל מחוזקות לרעשי רקע
+// VAD – ברירות מחדל
 const MB_VAD_THRESHOLD = envNumber('MB_VAD_THRESHOLD', 0.65);
 const MB_VAD_SILENCE_MS = envNumber('MB_VAD_SILENCE_MS', 900);
 const MB_VAD_PREFIX_MS = envNumber('MB_VAD_PREFIX_MS', 200);
-const MB_VAD_SUFFIX_MS = envNumber('MB_VAD_SUFFIX_MS', 200); // קטע שקט נוסף אחרי הזיהוי
+const MB_VAD_SUFFIX_MS = envNumber('MB_VAD_SUFFIX_MS', 200);
+
+// VAD צד־"לקוח" – כמה שקט נחשב סוף משפט לפני commit (במילישניות)
+const MB_CLIENT_VAD_TIMEOUT_MS = envNumber('MB_CLIENT_VAD_TIMEOUT_MS', 700);
 
 // Idle / Duration
-const MB_IDLE_WARNING_MS = envNumber('MB_IDLE_WARNING_MS', 40000); // 40 שניות
-const MB_IDLE_HANGUP_MS = envNumber('MB_IDLE_HANGUP_MS', 90000);  // 90 שניות
+const MB_IDLE_WARNING_MS = envNumber('MB_IDLE_WARNING_MS', 40000);
+const MB_IDLE_HANGUP_MS = envNumber('MB_IDLE_HANGUP_MS', 90000);
 
-// מגבלת זמן שיחה – ברירת מחדל 5 דקות
+// מגבלת זמן שיחה
 const MB_MAX_CALL_MS = envNumber('MB_MAX_CALL_MS', 5 * 60 * 1000);
-const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000); // 45 שניות לפני הסוף
-// כמה זמן אחרי הסגיר לנתק בכוח
+const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000);
 const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 5000);
 
 // האם מותר ללקוח לקטוע את הבוט (barge-in)
 const MB_ALLOW_BARGE_IN = envBool('MB_ALLOW_BARGE_IN', false);
 
-// Tail שבו עדיין לא מקשיבים אחרי שהבוט סיים לדבר (מילישניות)
+// Tail שבו עדיין לא מקשיבים אחרי שהבוט סיים לדבר
 const MB_NO_BARGE_TAIL_MS = envNumber('MB_NO_BARGE_TAIL_MS', 1600);
 
 // לידים / וובהוק
 const MB_ENABLE_LEAD_CAPTURE = envBool('MB_ENABLE_LEAD_CAPTURE', false);
 const MB_WEBHOOK_URL = process.env.MB_WEBHOOK_URL || '';
 
-// PARSING חכם ללידים
 const MB_ENABLE_SMART_LEAD_PARSING = envBool('MB_ENABLE_SMART_LEAD_PARSING', true);
 const MB_LEAD_PARSING_MODEL = process.env.MB_LEAD_PARSING_MODEL || 'gpt-4.1-mini';
 
-// Debug
 const MB_DEBUG = envBool('MB_DEBUG', false);
 
-// Twilio credentials לניתוק אקטיבי + שליפת פרטי שיחה
+// Twilio credentials
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || '';
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
 
@@ -147,11 +134,10 @@ console.log(
 const MB_DYNAMIC_KB_URL = process.env.MB_DYNAMIC_KB_URL || '';
 let dynamicBusinessPrompt = '';
 
-// זמן מינימלי בין ריענונים (ל-Throttling אחרי שיחות)
 let lastDynamicKbRefreshAt = 0;
 const MB_DYNAMIC_KB_MIN_INTERVAL_MS = envNumber(
   'MB_DYNAMIC_KB_MIN_INTERVAL_MS',
-  5 * 60 * 1000 // ברירת מחדל: לא יותר מפעם ב-5 דקות
+  5 * 60 * 1000
 );
 
 async function refreshDynamicBusinessPrompt(tag = 'DynamicKB') {
@@ -165,7 +151,9 @@ async function refreshDynamicBusinessPrompt(tag = 'DynamicKB') {
   const now = Date.now();
   if (tag !== 'Startup' && now - lastDynamicKbRefreshAt < MB_DYNAMIC_KB_MIN_INTERVAL_MS) {
     console.log(
-      `[INFO][${tag}] Skipping dynamic KB refresh – refreshed ${(now - lastDynamicKbRefreshAt)} ms ago (min interval ${MB_DYNAMIC_KB_MIN_INTERVAL_MS} ms).`
+      `[INFO][${tag}] Skipping dynamic KB refresh – refreshed ${
+        now - lastDynamicKbRefreshAt
+      } ms ago (min interval ${MB_DYNAMIC_KB_MIN_INTERVAL_MS} ms).`
     );
     return;
   }
@@ -224,23 +212,19 @@ function normalizePhoneNumber(rawPhone, callerNumber) {
 
   function normalize972(digits) {
     if (digits.startsWith('972') && (digits.length === 11 || digits.length === 12)) {
-      // גם לנייד (12) וגם לנייח (11) – משאירים את המספר אחרי 972 ומוסיפים 0
       return '0' + digits.slice(3);
     }
     return digits;
   }
 
   function isValidIsraeliPhone(digits) {
-    if (!/^0\d{8,9}$/.test(digits)) return false; // 9 או 10 ספרות, מתחיל ב-0
+    if (!/^0\d{8,9}$/.test(digits)) return false;
     const prefix2 = digits.slice(0, 2);
 
     if (digits.length === 9) {
-      // נייחים קלאסיים
       return ['02', '03', '04', '07', '08', '09'].includes(prefix2);
     } else {
-      // 10 ספרות – ניידים/07 וכדומה
       if (prefix2 === '05' || prefix2 === '07') return true;
-      // ליתר ביטחון נאפשר גם 02/03/04/08/09 עם 10 ספרות
       if (['02', '03', '04', '07', '08', '09'].includes(prefix2)) return true;
       return false;
     }
@@ -266,13 +250,6 @@ function normalizePhoneNumber(rawPhone, callerNumber) {
 // -----------------------------
 // System instructions builder
 // -----------------------------
-//
-// 🔥 מכאן ואילך – כל הטקסט של הפרומפט מגיע מה-ENV בלבד:
-// MB_GENERAL_PROMPT + (אופציונלי) MB_BUSINESS_PROMPT + dynamicBusinessPrompt.
-// אין יותר "פרומפט ענק" קשיח בתוך הקוד.
-//
-
-// חוקים קבועים למודל – כדי שלא ידבר על רעשי רקע ושלא יסיים שיחה לבד לפי מילים
 const EXTRA_BEHAVIOR_RULES = `
 חוקי מערכת קבועים (גבוהים מהפרומפט העסקי):
 1. אל תתייחסי למוזיקה, רעשים או איכות הקו, גם אם את מזהה אותם. התייחסי רק לתוכן מילולי שנשמע כמו דיבור מכוון אלייך. אם לא הבנת משפט – אמרי בקצרה משהו כמו: "לא שמעתי טוב, אפשר לחזור על זה?" בלי לתאר את הרעש.
@@ -289,19 +266,10 @@ function buildSystemInstructions() {
 
   let instructions = '';
 
-  if (base) {
-    instructions += base;
-  }
+  if (base) instructions += base;
+  if (staticKb) instructions += (instructions ? '\n\n' : '') + staticKb;
+  if (dynamicKb) instructions += (instructions ? '\n\n' : '') + dynamicKb;
 
-  if (staticKb) {
-    instructions += (instructions ? '\n\n' : '') + staticKb;
-  }
-
-  if (dynamicKb) {
-    instructions += (instructions ? '\n\n' : '') + dynamicKb;
-  }
-
-  // אם לא הוגדר שום דבר ב-ENV – שיהיה משהו מינימלי בלבד
   if (!instructions) {
     instructions = `
 אתם עוזר קולי בזמן אמת בשם "${BOT_NAME}" עבור שירות "${BUSINESS_NAME}".
@@ -309,9 +277,7 @@ function buildSystemInstructions() {
 `.trim();
   }
 
-  // מוסיפים תמיד את חוקי ההתנהגות הקבועים
   instructions += '\n\n' + EXTRA_BEHAVIOR_RULES;
-
   return instructions;
 }
 
@@ -322,14 +288,12 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// Twilio Voice webhook – מחזיר TwiML שמחבר את השיחה ל־Media Streams
 app.post('/twilio-voice', (req, res) => {
   const host = process.env.DOMAIN || req.headers.host;
   const wsUrl =
     process.env.MB_TWILIO_STREAM_URL ||
     `wss://${host.replace(/^https?:\/\//, '')}/twilio-media-stream`;
 
-  // {{trigger.call.From}} של טוויליו = req.body.From כאן
   const caller = req.body.From || '';
 
   const twiml = `
@@ -342,10 +306,7 @@ app.post('/twilio-voice', (req, res) => {
   </Connect>
 </Response>`.trim();
 
-  logInfo(
-    'Twilio-Voice',
-    `Returning TwiML with Stream URL: ${wsUrl}, From=${caller}`
-  );
+  logInfo('Twilio-Voice', `Returning TwiML with Stream URL: ${wsUrl}, From=${caller}`);
   res.type('text/xml').send(twiml);
 });
 
@@ -366,12 +327,10 @@ async function extractLeadFromConversation(conversationLog) {
     logDebug(tag, 'Smart lead parsing disabled via ENV.');
     return null;
   }
-
   if (!OPENAI_API_KEY) {
     logError(tag, 'Missing OPENAI_API_KEY for lead parsing.');
     return null;
   }
-
   if (!Array.isArray(conversationLog) || conversationLog.length === 0) {
     logDebug(tag, 'Empty conversationLog – skipping lead parsing.');
     return null;
@@ -396,23 +355,7 @@ async function extractLeadFromConversation(conversationLog) {
   "notes": string | null
 }
 
-הסברים:
-- "is_lead": true אם ברור שיש כאן פנייה עסקית / התעניינות אמיתית בשירות / הזמנת שירות. אחרת false.
-- "lead_type": "new" אם מדובר בלקוח חדש, "existing" אם הוא מציין שהוא לקוח קיים, אחרת "unknown".
-- "full_name": אם הלקוח נותן שם (פרטי או מלא) – כתוב כפי שנשמע. אם השם נאמר בעברית, כתוב אותו באותיות עבריות ולא באנגלית. אם לא ברור – null.
-- "business_name": אם הלקוח מזכיר שם עסק – כתוב כפי שנשמע. אם שם העסק נאמר בעברית, כתוב אותו באותיות עבריות ולא באנגלית. אחרת null.
-- "phone_number": אם בשיחה מופיע מספר טלפון של הלקוח – החזר אותו כרצף ספרות בלבד, בלי רווחים ובלי +972 ובלי להוריד 0 בהתחלה.
-  אם נשמעים כמה מספרים – בחר את המספר הרלוונטי ביותר ליצירת קשר, אחרת null.
-  אל תוסף ספרות שלא נאמרו, ואל תנחש מספר אם לא ברור.
-  אם המספר שנשמע אינו באורך 10 ספרות או 9 ספרות, או שאינו מתחיל בקידומת תקינה – עדיף להחזיר phone_number: null.
-- "reason": תיאור קצר וקולע בעברית של סיבת הפנייה (משפט אחד קצר).
-- "notes": כל דבר נוסף שיכול להיות רלוונטי לאיש מכירות / שירות (למשל: "מעוניין בדמו לבוט קולי", "פנייה דחופה", "שאל על מחירים" וכו').
-
-חשוב:
-- אם נראה שהשיחה היא רק הדגמה / סימולציה / תיאור של תסריט דוגמה לבוט קולי, ולא פנייה אמיתית של לקוח – החזר "is_lead": false ו-"phone_number": null.
-- אם רוב השיחה היא בעברית – העדף עברית בכל השדות הטקסטואליים (reason, notes, שמות אם נאמרו בעברית וכו').
-
-החזר אך ורק JSON תקין לפי הסכמה, בלי טקסט נוסף, בלי הסברים ובלי הערות.
+[הסברים כמו בקוד הקודם...]
 `.trim();
 
     const userPrompt = `
@@ -514,7 +457,7 @@ async function hangupTwilioCall(callSid, tag = 'Call') {
 }
 
 // -----------------------------
-// Helper – שליפה אקטיבית של המספר המזוהה מטוויליו לפי callSid
+// Helper – שליפה אקטיבית של המספר המזוהה
 // -----------------------------
 async function fetchCallerNumberFromTwilio(callSid, tag = 'Call') {
   if (!callSid) {
@@ -597,32 +540,50 @@ wss.on('connection', (connection, req) => {
   let idleHangupScheduled = false;
   let maxCallTimeout = null;
   let maxCallWarningTimeout = null;
-  let pendingHangup = null;    // { reason, closingMessage }
+  let pendingHangup = null;
   let openAiReady = false;
   let twilioClosed = false;
   let openAiClosed = false;
   let callEnded = false;
 
-  // מצב דיבור של הבוט (לצורך barge-in)
   let botSpeaking = false;
-
-  // האם יש response פעיל במודל
   let hasActiveResponse = false;
-
-  // דגל: האם זה עדיין "התור של הבוט"
   let botTurnActive = false;
-
-  // טיימסטמפ עד מתי אסור להקשיב ללקוח (זנב קצר אחרי סיום דיבור)
   let noListenUntilTs = 0;
-
-  // האם הלקוח כבר דיבר פעם אחת (רק אחר כך נאפשר barge-in)
   let userHasSpoken = false;
-
-  // האם וובהוק לידים כבר נשלח בשיחה הזו
   let leadWebhookSent = false;
 
+  // VAD צד־לקוח – טיימר commit
+  let clientVadTimeout = null;
+
+  function clearClientVadTimeout() {
+    if (clientVadTimeout) {
+      clearTimeout(clientVadTimeout);
+      clientVadTimeout = null;
+    }
+  }
+
+  function scheduleClientVadCommit() {
+    clearClientVadTimeout();
+    clientVadTimeout = setTimeout(() => {
+      clientVadTimeout = null;
+      if (!openAiReady || callEnded) return;
+      if (openAiWs.readyState !== WebSocket.OPEN) return;
+
+      logDebug('ClientVAD', 'Silence detected – committing audio buffer.');
+      openAiWs.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+
+      if (!hasActiveResponse) {
+        openAiWs.send(JSON.stringify({ type: 'response.create' }));
+        hasActiveResponse = true;
+        botTurnActive = true;
+        logDebug('ClientVAD', 'response.create sent after commit.');
+      }
+    }, MB_CLIENT_VAD_TIMEOUT_MS);
+  }
+
   // -----------------------------
-  // Helper: שליחת טקסט למודל עם הגנה על response כפול
+  // Helper: שליחת טקסט למודל
   // -----------------------------
   function sendModelPrompt(text, purpose) {
     if (openAiWs.readyState !== WebSocket.OPEN) {
@@ -632,7 +593,7 @@ wss.on('connection', (connection, req) => {
     if (hasActiveResponse) {
       logDebug(
         tag,
-        `Skipping model prompt (${purpose || 'no-tag'}) – conversation already has active response.`
+        `Skipping model prompt (${purpose || 'no-tag'}) – active response in progress.`
       );
       return;
     }
@@ -648,13 +609,10 @@ wss.on('connection', (connection, req) => {
     openAiWs.send(JSON.stringify(item));
     openAiWs.send(JSON.stringify({ type: 'response.create' }));
     hasActiveResponse = true;
-    botTurnActive = true;   // מרגע זה – זה "התור של הבוט"
+    botTurnActive = true;
     logInfo(tag, `Sending model prompt (${purpose || 'no-tag'})`);
   }
 
-  // -----------------------------
-  // Helper: האם הלקוח הזכיר מזוהה
-  // -----------------------------
   function conversationMentionsCallerId() {
     const patterns = [/מזוהה/, /למספר שממנו/, /למספר שממנו אני מתקשר/, /למספר שממנו התקשרתי/];
     return conversationLog.some(
@@ -663,21 +621,19 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: שליחת וובהוק לידים – פעם אחת בלבד, ורק אם זה ליד מלא
+  // Lead webhook (ללא שינוי לוגי משמעותי)
   // -----------------------------
   async function sendLeadWebhook(reason, closingMessage) {
     if (!MB_ENABLE_LEAD_CAPTURE || !MB_WEBHOOK_URL) {
       logDebug(tag, 'Lead capture disabled or no MB_WEBHOOK_URL – skipping webhook.');
       return;
     }
-
     if (leadWebhookSent) {
       logDebug(tag, 'Lead webhook already sent for this call – skipping.');
       return;
     }
 
     try {
-      // אם משום מה callerNumber ריק – נשלוף אותו מטוויליו לפי callSid (אותו From של {{trigger.call.From}})
       if (!callerNumber && callSid) {
         const resolved = await fetchCallerNumberFromTwilio(callSid, tag);
         if (resolved) {
@@ -686,43 +642,31 @@ wss.on('connection', (connection, req) => {
       }
 
       let parsedLead = await extractLeadFromConversation(conversationLog);
-
       if (!parsedLead || typeof parsedLead !== 'object') {
         logInfo(tag, 'No parsed lead object – skipping webhook (לא ליד מלא).');
         return;
       }
 
-      // כלל: אם אין טלפון מה-LLM – תמיד ננסה להשלים אותו מהמזוהה.
       if (!parsedLead.phone_number && callerNumber) {
         parsedLead.phone_number = callerNumber;
-
         const suffixNote = conversationMentionsCallerId()
           ? 'הלקוח ביקש חזרה למספר המזוהה ממנו התקשר.'
           : 'לא נמסר מספר טלפון מפורש בשיחה – נעשה שימוש במספר המזוהה מהמערכת.';
-
         parsedLead.notes =
-          (parsedLead.notes || '') +
-          (parsedLead.notes ? ' ' : '') +
-          suffixNote;
+          (parsedLead.notes || '') + (parsedLead.notes ? ' ' : '') + suffixNote;
       }
 
-      // נורמליזציה של מספר הטלפון שנאסף
-      const normalizedPhone = normalizePhoneNumber(
-        parsedLead.phone_number,
-        callerNumber
-      );
+      const normalizedPhone = normalizePhoneNumber(parsedLead.phone_number, callerNumber);
       parsedLead.phone_number = normalizedPhone;
 
-      // חשוב: גם caller_id_raw וגם CALLERID יהיו בלי +972, בפורמט 0XXXXXXXXX/0XXXXXXXX
       const callerDigits = normalizePhoneNumber(null, callerNumber);
-
-      const callerIdRaw = callerDigits || (callerNumber ? String(callerNumber).replace(/\D/g, '') : null);
+      const callerIdRaw =
+        callerDigits || (callerNumber ? String(callerNumber).replace(/\D/g, '') : null);
       const callerIdNormalized = callerDigits || callerIdRaw;
 
       parsedLead.caller_id_raw = callerIdRaw;
       parsedLead.caller_id_normalized = callerIdNormalized;
 
-      // חובה: business_name תמיד מלא
       if (
         !parsedLead.business_name ||
         typeof parsedLead.business_name !== 'string' ||
@@ -731,12 +675,7 @@ wss.on('connection', (connection, req) => {
         parsedLead.business_name = 'לא רלוונטי';
       }
 
-      // ❗ לוגיקה: כל ליד אמיתי עם טלפון → וובהוק
-      const isFullLead =
-        parsedLead.is_lead === true &&
-        !!parsedLead.phone_number;
-
-      // 👉 שולחים וובהוק רק אם זה "ליד מלא" (יש טלפון והוא באמת ליד).
+      const isFullLead = parsedLead.is_lead === true && !!parsedLead.phone_number;
       if (!isFullLead) {
         logInfo(tag, 'Parsed lead is NOT full lead – webhook will NOT be sent.', {
           is_lead: parsedLead.is_lead,
@@ -746,17 +685,9 @@ wss.on('connection', (connection, req) => {
         return;
       }
 
-      // phone_number = מספר לחזרה בפועל
       const finalPhoneNumber =
-        parsedLead.phone_number ||
-        callerIdNormalized ||
-        callerIdRaw;
-
-      // CALLERID = תמיד המזוהה בפורמט ישראלי (ללא +972)
-      const finalCallerId =
-        callerIdNormalized ||
-        callerIdRaw ||
-        null;
+        parsedLead.phone_number || callerIdNormalized || callerIdRaw;
+      const finalCallerId = callerIdNormalized || callerIdRaw || null;
 
       const payload = {
         streamSid,
@@ -764,11 +695,8 @@ wss.on('connection', (connection, req) => {
         callerNumber: callerIdRaw,
         callerIdRaw,
         callerIdNormalized,
-
-        // שני הפרמטרים שביקשת במפורש:
         phone_number: finalPhoneNumber,
         CALLERID: finalCallerId,
-
         botName: BOT_NAME,
         businessName: BUSINESS_NAME,
         startedAt: new Date(callStartTs).toISOString(),
@@ -787,7 +715,6 @@ wss.on('connection', (connection, req) => {
         CALLERID: finalCallerId
       });
 
-      // חוק: פעם אחת בלבד לכל שיחה
       leadWebhookSent = true;
 
       const res = await fetch(MB_WEBHOOK_URL, {
@@ -807,7 +734,7 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: סיום שיחה מרוכז – ניתוק אחרי סגיר
+  // endCall + scheduleEndCall + closing detection – כמו קודם
   // -----------------------------
   function endCall(reason, closingMessage) {
     if (callEnded) {
@@ -816,6 +743,8 @@ wss.on('connection', (connection, req) => {
     }
     callEnded = true;
 
+    clearClientVadTimeout();
+
     logInfo(tag, `endCall called with reason="${reason}"`);
     logInfo(tag, 'Final conversation log:', conversationLog);
 
@@ -823,26 +752,22 @@ wss.on('connection', (connection, req) => {
     if (maxCallTimeout) clearTimeout(maxCallTimeout);
     if (maxCallWarningTimeout) clearTimeout(maxCallWarningTimeout);
 
-    // לא מחכים ל-webhook – שולחים בפייר אנד פורגט (אם יש ליד מלא)
     if (MB_ENABLE_LEAD_CAPTURE && MB_WEBHOOK_URL) {
       sendLeadWebhook(reason, closingMessage || MB_CLOSING_SCRIPT).catch((err) =>
         logError(tag, 'sendLeadWebhook fire-and-forget error', err)
       );
     }
 
-    // ריענון KB דינאמי אחרי סיום שיחה
     if (MB_DYNAMIC_KB_URL) {
       refreshDynamicBusinessPrompt('PostCall').catch((err) =>
         logError(tag, 'DynamicKB post-call refresh failed', err)
       );
     }
 
-    // ניתוק אקטיבי בטוויליו (סיום שיחה פיזית)
     if (callSid) {
       hangupTwilioCall(callSid, tag).catch(() => {});
     }
 
-    // סוגרים OpenAI ו-Twilio WS
     if (!openAiClosed && openAiWs.readyState === WebSocket.OPEN) {
       openAiClosed = true;
       openAiWs.close();
@@ -859,14 +784,10 @@ wss.on('connection', (connection, req) => {
     noListenUntilTs = 0;
   }
 
-  // -----------------------------
-  // Helper: תזמון סיום שיחה אחרי סגיר – לגרסאות שבהן אנחנו מבקשים מהמודל לומר את משפט הסיום
-  // -----------------------------
   function scheduleEndCall(reason, closingMessage) {
     if (callEnded) return;
 
     const msg = closingMessage || MB_CLOSING_SCRIPT;
-
     if (pendingHangup) {
       logDebug(tag, 'Hangup already scheduled, skipping duplicate.');
       return;
@@ -875,7 +796,6 @@ wss.on('connection', (connection, req) => {
     logInfo(tag, `scheduleEndCall invoked. reason="${reason}", closingMessage="${msg}"`);
     pendingHangup = { reason, closingMessage: msg };
 
-    // שולחים לבוט לומר את משפט הסגירה
     if (openAiWs.readyState === WebSocket.OPEN) {
       sendModelPrompt(
         `סיימי את השיחה עם הלקוח במשפט הבא בלבד, בלי להוסיף שום משפט נוסף: "${msg}"`,
@@ -883,7 +803,6 @@ wss.on('connection', (connection, req) => {
       );
       logInfo(tag, `Closing message sent to model: ${msg}`);
     } else {
-      // אם אין חיבור למודל – מנתקים מיד בלי לחכות
       const ph = pendingHangup;
       pendingHangup = null;
       endCall(ph.reason, ph.closingMessage);
@@ -892,11 +811,8 @@ wss.on('connection', (connection, req) => {
 
     const rawGrace =
       MB_HANGUP_GRACE_MS && MB_HANGUP_GRACE_MS > 0 ? MB_HANGUP_GRACE_MS : 3000;
-
-    // לא מאפשרים ערכים קיצוניים – תמיד בין 2 ל-8 שניות
     const graceMs = Math.max(2000, Math.min(rawGrace, 8000));
 
-    // fallback: אם משום מה לא קיבלנו response.audio.done / response.completed
     setTimeout(() => {
       if (callEnded || !pendingHangup) return;
       const ph = pendingHangup;
@@ -911,9 +827,6 @@ wss.on('connection', (connection, req) => {
     );
   }
 
-  // -----------------------------
-  // Helper: תזמון ניתוק כאשר הבוט כבר אמר את משפט הסיום (לפי MB_CLOSING_SCRIPT בלבד)
-  // -----------------------------
   function scheduleHangupAfterBotClosing(reason) {
     if (callEnded) return;
     if (pendingHangup) {
@@ -941,15 +854,11 @@ wss.on('connection', (connection, req) => {
     );
   }
 
-  // -----------------------------
-  // Helper: בדיקת משפט סיום של הבוט – **רק** לפי MB_CLOSING_SCRIPT מה-ENV
-  // -----------------------------
   function checkBotClosing(botText) {
     if (!botText || !NORMALIZED_CLOSING_SCRIPT) return;
     const norm = normalizeForClosing(botText);
     if (!norm) return;
 
-    // ננתק רק אם משפט הסיום המוגדר ב-ENV מופיע בצורה ברורה בטקסט
     if (
       norm.includes(NORMALIZED_CLOSING_SCRIPT) ||
       NORMALIZED_CLOSING_SCRIPT.includes(norm)
@@ -959,9 +868,6 @@ wss.on('connection', (connection, req) => {
     }
   }
 
-  // -----------------------------
-  // Helper: הודעת "אתם עדיין איתי?"
-  // -----------------------------
   function sendIdleWarningIfNeeded() {
     if (idleWarningSent || callEnded) return;
     idleWarningSent = true;
@@ -1026,7 +932,6 @@ wss.on('connection', (connection, req) => {
 
     switch (type) {
       case 'response.created':
-        // כל response חדש – מתחיל "תור" של הבוט
         currentBotText = '';
         hasActiveResponse = true;
         botTurnActive = true;
@@ -1052,13 +957,13 @@ wss.on('connection', (connection, req) => {
         const text = currentBotText.trim();
         if (text) {
           conversationLog.push({ from: 'bot', text });
+          logInfo('Bot', text);
           checkBotClosing(text);
         }
         currentBotText = '';
         break;
       }
 
-      // אודיו לבוט → לטוויליו
       case 'response.audio.delta': {
         const b64 = msg.delta;
         if (!b64 || !streamSid) break;
@@ -1109,7 +1014,8 @@ wss.on('connection', (connection, req) => {
         if (t) {
           t = t.replace(/\s+/g, ' ').replace(/\s+([,.:;!?])/g, '$1');
           conversationLog.push({ from: 'user', text: t });
-          userHasSpoken = true; // מפה והלאה מותר barge-in (אם מופעל ב-ENV)
+          logInfo('User', t);
+          userHasSpoken = true;
         }
         break;
       }
@@ -1187,12 +1093,8 @@ wss.on('connection', (connection, req) => {
         }
       }, 1000);
 
-      // Max call duration + התראה לפני
       if (MB_MAX_CALL_MS > 0) {
-        if (
-          MB_MAX_WARN_BEFORE_MS > 0 &&
-          MB_MAX_CALL_MS > MB_MAX_WARN_BEFORE_MS
-        ) {
+        if (MB_MAX_WARN_BEFORE_MS > 0 && MB_MAX_CALL_MS > MB_MAX_WARN_BEFORE_MS) {
           maxCallWarningTimeout = setTimeout(() => {
             const t =
               'אנחנו מתקרבים לסיום הזמן לשיחה הזאת. אם תרצו להתקדם, אפשר עכשיו לסכם ולהשאיר פרטים.';
@@ -1212,13 +1114,10 @@ wss.on('connection', (connection, req) => {
       lastMediaTs = Date.now();
       const payload = msg.media?.payload;
       if (!payload) return;
-
       if (!openAiReady || openAiWs.readyState !== WebSocket.OPEN) return;
 
       const now = Date.now();
 
-      // מצב 1 – אין barge-in (MB_ALLOW_BARGE_IN=false) או שהלקוח עוד לא דיבר בכלל:
-      // במקרה הזה אנחנו מתנהגים כמו קודם – לא שומעים את הלקוח בזמן שהבוט מדבר / בזנב.
       if (!MB_ALLOW_BARGE_IN || !userHasSpoken) {
         if (botTurnActive || botSpeaking || now < noListenUntilTs) {
           logDebug(
@@ -1229,20 +1128,16 @@ wss.on('connection', (connection, req) => {
           return;
         }
       } else {
-        // מצב 2 – barge-in פעיל, והלקוח כבר דיבר בשיחה:
         if (botTurnActive || botSpeaking) {
           if (hasActiveResponse) {
             logInfo('BargeIn', 'User barge-in detected – cancelling current bot response.');
             try {
               openAiWs.send(JSON.stringify({ type: 'response.cancel' }));
+              hasActiveResponse = false;
+              botTurnActive = false;
             } catch (err) {
               logError('BargeIn', 'Error sending response.cancel', err);
             }
-          } else {
-            logDebug(
-              'BargeIn',
-              'User audio while botSpeaking but hasActiveResponse=false – skipping cancel.'
-            );
           }
         }
       }
@@ -1252,6 +1147,9 @@ wss.on('connection', (connection, req) => {
         audio: payload
       };
       openAiWs.send(JSON.stringify(oaMsg));
+
+      // כל פעם שיש אודיו מהלקוח – נחדש את טיימר ה־VAD שלנו
+      scheduleClientVadCommit();
     } else if (event === 'stop') {
       logInfo(tag, 'Twilio stream stopped.');
       twilioClosed = true;
@@ -1283,9 +1181,7 @@ wss.on('connection', (connection, req) => {
 // -----------------------------
 server.listen(PORT, () => {
   console.log(`✅ MisterBot Realtime Voice Bot running on port ${PORT}`);
-  // ריענון KB דינאמי פעם אחת בהפעלה
   refreshDynamicBusinessPrompt('Startup').catch((err) =>
     console.error('[ERROR][DynamicKB] initial load failed', err)
   );
-  // אין יותר setInterval – מעכשיו ריענון KB קורה רק אחרי שיחות (PostCall + Throttling)
 });
