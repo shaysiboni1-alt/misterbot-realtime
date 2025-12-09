@@ -981,9 +981,10 @@ wss.on('connection', (connection, req) => {
     if (!MB_ALLOW_BARGE_IN) return;
     if (callEnded) return;
 
-    // ❗ אל תעשה barge-in על הפתיח הראשון – עד שלא היה לפחות משפט אחד של הלקוח
-    if (conversationLog.length === 0) {
-      logDebug('BargeIn', 'Skip cancel during opening greeting (no user turns yet).');
+    // ❗ הגנה: barge-in אפשרי רק אחרי שהיה לפחות סיבוב אחד של לקוח
+    const hasUserTurn = conversationLog.some((m) => m.from === 'user');
+    if (!hasUserTurn) {
+      logDebug('BargeIn', 'Skip cancel – no user turn yet (protect opening).');
       return;
     }
 
