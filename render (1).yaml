@@ -1,0 +1,20 @@
+# Exported from Render on 2025-12-10T03:06:47Z
+version: "1"
+projects:
+- name: My project
+  environments:
+  - name: Production
+    services:
+    - type: web
+      name: misterbot-realtime
+      runtime: node
+      repo: https://github.com/shaysiboni1-alt/misterbot-realtime
+      plan: starter
+      envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - fromGroup: misterbot-env
+      region: frankfurt
+      buildCommand: npm install
+      startCommand: node server.js
+      autoDeployTrigger: commit
