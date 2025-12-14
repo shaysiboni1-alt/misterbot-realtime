@@ -3,7 +3,6 @@
 // MisterBot Realtime Voice Bot – "נטע"
 // Twilio Media Streams <-> OpenAI Realtime API (gpt-4o-realtime-preview-2024-12-17)
 //
-//
 // חוקים עיקריים לפי ה-MASTER PROMPT:
 // - שיחה בעברית כברירת מחדל, לשון רבים, טון חם וקצר.
 // - שליטה מלאה דרך ENV (פתיח, סגיר, פרומפט כללי, KB עסקי, טיימרים, לידים, VAD).
@@ -13,7 +12,6 @@
 // דרישות:
 //   npm install express ws dotenv
 //   (מומלץ Node 18+ כדי ש-fetch יהיה זמין גלובלית)
-//
 //
 // Twilio Voice Webhook ->  POST /twilio-voice  (TwiML)
 // Twilio Media Streams -> wss://<domain>/twilio-media-stream
@@ -64,7 +62,7 @@ const MB_CLOSING_SCRIPT =
 const MB_GENERAL_PROMPT = process.env.MB_GENERAL_PROMPT || '';
 const MB_BUSINESS_PROMPT = process.env.MB_BUSINESS_PROMPT || '';
 
-// אפשר להשאיר את זה לשימוש עתידי / לוגים, אבל הוא כבר לא מכתיב טקסט בקוד
+// אפשר להשאיר לשימוש עתידי
 const MB_LANGUAGES = (process.env.MB_LANGUAGES || 'he,en,ru,ar')
   .split(',')
   .map((s) => s.trim())
@@ -75,10 +73,15 @@ const MB_SPEECH_SPEED = envNumber('MB_SPEECH_SPEED', 1.15);
 const OPENAI_VOICE = process.env.OPENAI_VOICE || 'alloy';
 
 // -----------------------------
+// ✅ Memory (NEW)
+// -----------------------------
+const MB_MEMORY_MAX_MESSAGES = envNumber('MB_MEMORY_MAX_MESSAGES', 10); // ביקשת 10
+
+// -----------------------------
 // ✅ Dashboard / Make webhooks (NEW – safe layer)
 // -----------------------------
-const MB_SETTINGS_API_URL = process.env.MB_SETTINGS_API_URL || ''; // Scenario: neta_settings_api (optional)
-const MB_CALL_LOG_WEBHOOK_URL = process.env.MB_CALL_LOG_WEBHOOK_URL || ''; // Scenario: neta_call_log (required for Airtable logs)
+const MB_SETTINGS_API_URL = process.env.MB_SETTINGS_API_URL || ''; // optional
+const MB_CALL_LOG_WEBHOOK_URL = process.env.MB_CALL_LOG_WEBHOOK_URL || ''; // required for Airtable logs
 const MB_CALL_LOG_ENABLED = envBool(
   'MB_CALL_LOG_ENABLED',
   !!MB_CALL_LOG_WEBHOOK_URL
@@ -95,8 +98,6 @@ let remoteSettings = {
   closing_script: null,
   master_prompt: null,
   business_prompt: null,
-  // You can optionally pass other fields from Airtable like:
-  // openai_voice, speech_speed, business_kb_url ...
   openai_voice: null,
   speech_speed: null
 };
@@ -215,7 +216,8 @@ const MB_IDLE_HANGUP_MS = envNumber('MB_IDLE_HANGUP_MS', 90000);  // 90 שניו
 // מגבלת זמן שיחה – ברירת מחדל 5 דקות
 const MB_MAX_CALL_MS = envNumber('MB_MAX_CALL_MS', 5 * 60 * 1000);
 const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000); // 45 שניות לפני הסוף
-// כמה זמן אחרי הסגיר לנתק בכוח
+
+// ✅ כמה זמן אחרי הסגיר לנתק בכוח
 const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 5000);
 
 // האם מותר ללקוח לקטוע את הבוט (barge-in)
@@ -241,9 +243,7 @@ const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
 
 console.log(`[CONFIG] MB_HANGUP_GRACE_MS=${MB_HANGUP_GRACE_MS} ms`);
 console.log(
-  `[CONFIG] MB_ALLOW_BARGE_IN=${MB_ALLOW_BARGE_IN}, MB_NO_BARGE_TAIL_MS=${MB_NO_BARGE_TAIL_MS} ms, MB_LANGUAGES=${MB_LANGUAGES.join(
-    ','
-  )}`
+  `[CONFIG] MB_ALLOW_BARGE_IN=${MB_ALLOW_BARGE_IN}, MB_NO_BARGE_TAIL_MS=${MB_NO_BARGE_TAIL_MS} ms, MB_LANGUAGES=${MB_LANGUAGES.join(',')}`
 );
 
 // -----------------------------
@@ -256,7 +256,7 @@ let dynamicBusinessPrompt = '';
 let lastDynamicKbRefreshAt = 0;
 const MB_DYNAMIC_KB_MIN_INTERVAL_MS = envNumber(
   'MB_DYNAMIC_KB_MIN_INTERVAL_MS',
-  5 * 60 * 1000 // ברירת מחדל: לא יותר מפעם ב-5 דקות
+  5 * 60 * 1000
 );
 
 async function refreshDynamicBusinessPrompt(tag = 'DynamicKB') {
@@ -407,6 +407,29 @@ function buildSystemInstructions() {
 }
 
 // -----------------------------
+// ✅ Memory helper (NEW)
+// -----------------------------
+function buildLastMessagesContext(conversationLog, maxMessages) {
+  const max = Math.max(0, Number(maxMessages) || 0);
+  if (!Array.isArray(conversationLog) || max <= 0) return '';
+
+  const tail = conversationLog
+    .filter((m) => m && (m.from === 'user' || m.from === 'bot') && (m.text || '').trim())
+    .slice(-max);
+
+  const lines = tail.map((m) => {
+    const who = m.from === 'user' ? 'לקוח' : BOT_NAME;
+    const t = String(m.text || '').replace(/\s+/g, ' ').trim();
+    return `${who}: ${t}`;
+  });
+
+  // הגנה שלא נשלח מגילות
+  const joined = lines.join('\n');
+  const limit = 2000;
+  return joined.length > limit ? joined.slice(-limit) : joined;
+}
+
+// -----------------------------
 // Express & HTTP
 // -----------------------------
 const app = express();
@@ -431,10 +454,7 @@ app.post('/twilio-voice', (req, res) => {
   </Connect>
 </Response>`.trim();
 
-  logInfo(
-    'Twilio-Voice',
-    `Returning TwiML with Stream URL: ${wsUrl}, From=${caller}`
-  );
+  logInfo('Twilio-Voice', `Returning TwiML with Stream URL: ${wsUrl}, From=${caller}`);
   res.type('text/xml').send(twiml);
 });
 
@@ -553,10 +573,7 @@ async function hangupTwilioCall(callSid, tag = 'Call') {
     return;
   }
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
-    logDebug(
-      tag,
-      'TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN missing – cannot hang up via Twilio API.'
-    );
+    logDebug(tag, 'TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN missing – cannot hang up via Twilio API.');
     return;
   }
 
@@ -595,10 +612,7 @@ async function fetchCallerNumberFromTwilio(callSid, tag = 'Call') {
     return null;
   }
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
-    logDebug(
-      tag,
-      'fetchCallerNumberFromTwilio: missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN.'
-    );
+    logDebug(tag, 'fetchCallerNumberFromTwilio: missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN.');
     return null;
   }
 
@@ -622,10 +636,7 @@ async function fetchCallerNumberFromTwilio(callSid, tag = 'Call') {
     const data = await res.json();
     const fromRaw = data.from || data.caller_name || null;
 
-    logInfo(
-      tag,
-      `fetchCallerNumberFromTwilio: resolved caller="${fromRaw}" from Twilio Call resource.`
-    );
+    logInfo(tag, `fetchCallerNumberFromTwilio: resolved caller="${fromRaw}" from Twilio Call resource.`);
     return fromRaw;
   } catch (err) {
     logError(tag, 'fetchCallerNumberFromTwilio: error fetching from Twilio', err);
@@ -646,7 +657,7 @@ wss.on('connection', (connection, req) => {
     return;
   }
 
-  // ✅ refresh settings in background (safe, non-blocking)
+  // ✅ refresh settings (safe, non-blocking)
   refreshRemoteSettings('OnConnect').catch(() => {});
 
   let streamSid = null;
@@ -688,46 +699,16 @@ wss.on('connection', (connection, req) => {
 
   let leadWebhookSent = false;
 
-  // -----------------------------
-  // Helper: שליחת טקסט למודל עם הגנה על response כפול
-  // -----------------------------
-  function sendModelPrompt(text, purpose) {
-    if (openAiWs.readyState !== WebSocket.OPEN) {
-      logDebug(tag, `Cannot send model prompt (${purpose || 'no-tag'}) – WS not open.`);
-      return;
-    }
-    if (hasActiveResponse) {
-      logDebug(
-        tag,
-        `Skipping model prompt (${purpose || 'no-tag'}) – conversation already has active response.`
-      );
-      return;
-    }
+  // ✅ GRACE hangup scheduling flags (NEW)
+  let hangupRequested = false;
+  let hangupTimer = null;
 
-    const item = {
-      type: 'conversation.item.create',
-      item: {
-        type: 'message',
-        role: 'user',
-        content: [{ type: 'input_text', text }]
-      }
-    };
-    openAiWs.send(JSON.stringify(item));
-    openAiWs.send(JSON.stringify({ type: 'response.create' }));
-    hasActiveResponse = true;
-    botTurnActive = true;
-    logInfo(tag, `Sending model prompt (${purpose || 'no-tag'})`);
-  }
-
-  function conversationMentionsCallerId() {
-    const patterns = [/מזוהה/, /למספר שממנו/, /למספר שממנו אני מתקשר/, /למספר שממנו התקשרתי/];
-    return conversationLog.some(
-      (m) => m.from === 'user' && patterns.some((re) => re.test(m.text || ''))
-    );
-  }
+  // ✅ dedupe transcripts (NEW)
+  let lastUserTranscript = '';
+  let lastUserTranscriptAt = 0;
 
   // -----------------------------
-  // ✅ Dashboard helper: Send Call Log webhook (NEW)
+  // ✅ Dashboard helper: Send Call Log webhook
   // -----------------------------
   function mapCallStatus(reason) {
     const r = String(reason || '').toLowerCase();
@@ -753,7 +734,6 @@ wss.on('connection', (connection, req) => {
       const collectedPhone = normalizePhoneNumber(parsedLead?.phone_number, callerNumber);
 
       const payload = {
-        // ✅ fields that you already created in Airtable
         call_id: callSid || streamSid || `call_${Date.now()}`,
         call_direction: 'inbound',
         started_at: startedAt,
@@ -769,7 +749,6 @@ wss.on('connection', (connection, req) => {
         has_lead: parsedLead?.is_lead === true
       };
 
-      // add extra safe fields (won't break Make; just available if you map)
       payload.lead_type = parsedLead?.lead_type || null;
       payload.lead_notes = parsedLead?.notes || null;
       payload.reason = reason || null;
@@ -787,6 +766,16 @@ wss.on('connection', (connection, req) => {
     } catch (err) {
       logError(tag, 'sendCallLogWebhook error', err);
     }
+  }
+
+  // -----------------------------
+  // Helper: האם בשיחה הלקוח ביקש "מזוהה"
+  // -----------------------------
+  function conversationMentionsCallerId() {
+    const patterns = [/מזוהה/, /למספר שממנו/, /למספר שממנו אני מתקשר/, /למספר שממנו התקשרתי/];
+    return conversationLog.some(
+      (m) => m.from === 'user' && patterns.some((re) => re.test(m.text || ''))
+    );
   }
 
   // -----------------------------
@@ -922,16 +911,59 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: סיום שיחה מרוכז – ניתוק אחרי סגיר
+  // ✅ Helper – schedule Twilio hangup AFTER GRACE (NEW)
   // -----------------------------
-  async function endCall(reason, closingMessage) {
+  function scheduleTwilioHangupAfterGrace(reason, hangupAfterMs) {
+    if (hangupRequested) return;
+    if (!callSid) return;
+
+    // אם Twilio כבר סגר את השיחה/stream – אין מה לבקש hangup
+    if (reason === 'twilio_stop' || reason === 'twilio_ws_closed' || reason === 'twilio_ws_error') {
+      return;
+    }
+
+    const raw = Number.isFinite(hangupAfterMs) ? hangupAfterMs : MB_HANGUP_GRACE_MS;
+    const graceMs = Math.max(0, Math.min(raw, 20000)); // לא משתוללים
+    hangupRequested = true;
+
+    logInfo(tag, `Scheduling Twilio hangup after GRACE: ${graceMs} ms (reason="${reason}")`);
+
+    hangupTimer = setTimeout(async () => {
+      try {
+        await hangupTwilioCall(callSid, tag);
+      } catch {}
+      // אחרי בקשת הניתוק – סוגרים WS אם עדיין פתוחים
+      try {
+        if (!openAiClosed && openAiWs.readyState === WebSocket.OPEN) {
+          openAiClosed = true;
+          openAiWs.close();
+        }
+      } catch {}
+      try {
+        if (!twilioClosed && connection.readyState === WebSocket.OPEN) {
+          twilioClosed = true;
+          connection.close();
+        }
+      } catch {}
+    }, graceMs);
+  }
+
+  // -----------------------------
+  // Helper: סיום שיחה מרוכז – ניתוק אחרי GRACE
+  // -----------------------------
+  async function endCall(reason, closingMessage, opts = {}) {
     if (callEnded) {
       logDebug(tag, `endCall called again (${reason}) – already ended.`);
       return;
     }
     callEnded = true;
 
-    logInfo(tag, `endCall called with reason="${reason}"`);
+    const hangupAfterMs =
+      typeof opts.hangupAfterMs === 'number' && Number.isFinite(opts.hangupAfterMs)
+        ? opts.hangupAfterMs
+        : MB_HANGUP_GRACE_MS;
+
+    logInfo(tag, `endCall called with reason="${reason}", hangupAfterMs=${hangupAfterMs}`);
     logInfo(tag, 'Final conversation log:', conversationLog);
 
     if (idleCheckInterval) clearInterval(idleCheckInterval);
@@ -944,17 +976,16 @@ wss.on('connection', (connection, req) => {
     let parsedLeadForLog = null;
     try {
       parsedLeadForLog = await extractLeadFromConversation(conversationLog);
-      // complete phone via caller id if needed
       if (parsedLeadForLog && typeof parsedLeadForLog === 'object') {
         const normalized = normalizePhoneNumber(parsedLeadForLog.phone_number, callerNumber);
         parsedLeadForLog.phone_number = normalized || parsedLeadForLog.phone_number || null;
       }
     } catch (e) {}
 
-    // ✅ Call Log webhook (fire-and-forget, does not block hangup)
+    // ✅ Call Log webhook (fire-and-forget)
     sendCallLogWebhook({ reason, closingMessage: effectiveClosing, parsedLead: parsedLeadForLog }).catch(() => {});
 
-    // לא מחכים ל-webhook – שולחים בפייר אנד פורגט (אם יש ליד מלא)
+    // Lead webhook (fire-and-forget) – רק ליד מלא
     if (MB_ENABLE_LEAD_CAPTURE && MB_WEBHOOK_URL) {
       sendLeadWebhook(reason, effectiveClosing).catch((err) =>
         logError(tag, 'sendLeadWebhook fire-and-forget error', err)
@@ -968,20 +999,23 @@ wss.on('connection', (connection, req) => {
       );
     }
 
-    // ניתוק אקטיבי בטוויליו (סיום שיחה פיזית)
-    if (callSid) {
-      hangupTwilioCall(callSid, tag).catch(() => {});
-    }
+    // ✅ ניתוק אקטיבי בטוויליו רק אחרי GRACE
+    scheduleTwilioHangupAfterGrace(reason, hangupAfterMs);
 
-    // סוגרים OpenAI ו-Twilio WS
-    if (!openAiClosed && openAiWs.readyState === WebSocket.OPEN) {
-      openAiClosed = true;
-      openAiWs.close();
-    }
-
-    if (!twilioClosed && connection.readyState === WebSocket.OPEN) {
-      twilioClosed = true;
-      connection.close();
+    // אם אין callSid או שאנחנו במצב ש-Twilio כבר נסגר – סוגרים WS מיד
+    if (!callSid || reason === 'twilio_stop' || reason === 'twilio_ws_closed' || reason === 'twilio_ws_error') {
+      try {
+        if (!openAiClosed && openAiWs.readyState === WebSocket.OPEN) {
+          openAiClosed = true;
+          openAiWs.close();
+        }
+      } catch {}
+      try {
+        if (!twilioClosed && connection.readyState === WebSocket.OPEN) {
+          twilioClosed = true;
+          connection.close();
+        }
+      } catch {}
     }
 
     botSpeaking = false;
@@ -990,6 +1024,9 @@ wss.on('connection', (connection, req) => {
     noListenUntilTs = 0;
   }
 
+  // -----------------------------
+  // Helper: תזמון סיום (closing) – עם fallback
+  // -----------------------------
   function scheduleEndCall(reason, closingMessage) {
     if (callEnded) return;
 
@@ -1006,16 +1043,18 @@ wss.on('connection', (connection, req) => {
     if (openAiWs.readyState === WebSocket.OPEN) {
       sendModelPrompt(
         `סיימי את השיחה עם הלקוח במשפט הבא בלבד, בלי להוסיף שום משפט נוסף: "${msg}"`,
-        'closing'
+        'closing',
+        { includeHistory: false }
       );
       logInfo(tag, `Closing message sent to model: ${msg}`);
     } else {
       const ph = pendingHangup;
       pendingHangup = null;
-      endCall(ph.reason, ph.closingMessage);
+      endCall(ph.reason, ph.closingMessage, { hangupAfterMs: MB_HANGUP_GRACE_MS });
       return;
     }
 
+    // fallback: אם לא מגיע סגירה / audio.done – לא נתקעים
     const rawGrace =
       MB_HANGUP_GRACE_MS && MB_HANGUP_GRACE_MS > 0 ? MB_HANGUP_GRACE_MS : 3000;
     const graceMs = Math.max(2000, Math.min(rawGrace, 8000));
@@ -1024,14 +1063,12 @@ wss.on('connection', (connection, req) => {
       if (callEnded || !pendingHangup) return;
       const ph = pendingHangup;
       pendingHangup = null;
-      logInfo(tag, `Hangup grace reached (${graceMs} ms), forcing endCall.`);
-      endCall(ph.reason, ph.closingMessage);
+      logInfo(tag, `Hangup fallback reached (${graceMs} ms), forcing endCall (no extra grace).`);
+      // כבר "חיכינו" grace בפאלבק -> לא עושים grace כפול
+      endCall(ph.reason, ph.closingMessage, { hangupAfterMs: 0 });
     }, graceMs);
 
-    logInfo(
-      tag,
-      `scheduleEndCall: hangup scheduled (with fallback in ${graceMs} ms) with reason="${reason}".`
-    );
+    logInfo(tag, `scheduleEndCall: fallback endCall in ${graceMs} ms (reason="${reason}").`);
   }
 
   function scheduleHangupAfterBotClosing(reason) {
@@ -1043,22 +1080,9 @@ wss.on('connection', (connection, req) => {
 
     const msg = getClosingScript();
     pendingHangup = { reason, closingMessage: msg };
-    const rawGrace =
-      MB_HANGUP_GRACE_MS && MB_HANGUP_GRACE_MS > 0 ? MB_HANGUP_GRACE_MS : 3000;
-    const graceMs = Math.max(2000, Math.min(rawGrace, 8000));
 
-    setTimeout(() => {
-      if (callEnded || !pendingHangup) return;
-      const ph = pendingHangup;
-      pendingHangup = null;
-      logInfo(tag, `Hangup grace (bot closing) reached (${graceMs} ms), forcing endCall.`);
-      endCall(ph.reason, ph.closingMessage);
-    }, graceMs);
-
-    logInfo(
-      tag,
-      `Bot closing detected – hangup scheduled (with fallback in ${graceMs} ms) reason="${reason}".`
-    );
+    // כאן לא מסיימים מיד – נותנים ל-response להסתיים ואז endCall עם GRACE
+    logInfo(tag, `Bot closing detected – pendingHangup set. reason="${reason}".`);
   }
 
   function checkBotClosing(botText) {
@@ -1083,8 +1107,48 @@ wss.on('connection', (connection, req) => {
       'אני עדיין כאן על הקו, אתם איתי? אם תרצו להמשיך, אפשר פשוט לשאול או לבקש.';
     sendModelPrompt(
       `תגיבי ללקוח במשפט קצר בסגנון הבא (אפשר לשנות קצת): "${text}"`,
-      'idle_warning'
+      'idle_warning',
+      { includeHistory: true }
     );
+  }
+
+  // -----------------------------
+  // ✅ Helper: שליחת טקסט למודל + Memory (UPDATED)
+  // -----------------------------
+  function sendModelPrompt(text, purpose, options = {}) {
+    const includeHistory = options.includeHistory !== false;
+
+    if (openAiWs.readyState !== WebSocket.OPEN) {
+      logDebug(tag, `Cannot send model prompt (${purpose || 'no-tag'}) – WS not open.`);
+      return;
+    }
+    if (hasActiveResponse) {
+      logDebug(tag, `Skipping model prompt (${purpose || 'no-tag'}) – active response in progress.`);
+      return;
+    }
+
+    let finalText = String(text || '').trim();
+    if (includeHistory) {
+      const ctx = buildLastMessagesContext(conversationLog, MB_MEMORY_MAX_MESSAGES);
+      if (ctx) {
+        finalText = `הקשר שיחה (עד ${MB_MEMORY_MAX_MESSAGES} הודעות אחרונות):\n${ctx}\n\nהודעה נוכחית:\n${finalText}`;
+      }
+    }
+
+    const item = {
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: finalText }]
+      }
+    };
+
+    openAiWs.send(JSON.stringify(item));
+    openAiWs.send(JSON.stringify({ type: 'response.create' }));
+    hasActiveResponse = true;
+    botTurnActive = true;
+    logInfo(tag, `Sending model prompt (${purpose || 'no-tag'})`);
   }
 
   // -----------------------------
@@ -1122,7 +1186,8 @@ wss.on('connection', (connection, req) => {
     const greetingText = getOpeningScript();
     sendModelPrompt(
       `פתחי את השיחה עם הלקוח במשפט הבא (אפשר לשנות מעט את הניסוח אבל לא להאריך): "${greetingText}" ואז עצרי והמתיני לתשובה שלו.`,
-      'opening_greeting'
+      'opening_greeting',
+      { includeHistory: false }
     );
   });
 
@@ -1193,11 +1258,13 @@ wss.on('connection', (connection, req) => {
       case 'response.audio.done': {
         botSpeaking = false;
         botTurnActive = false;
+
+        // ✅ אם זו סגירה – לא מנתקים מיד. endCall ינתק אחרי GRACE.
         if (pendingHangup && !callEnded) {
           const ph = pendingHangup;
           pendingHangup = null;
-          logInfo(tag, 'Closing audio finished, ending call now.');
-          endCall(ph.reason, ph.closingMessage);
+          logInfo(tag, 'Closing audio finished, ending call (hangup AFTER GRACE).');
+          endCall(ph.reason, ph.closingMessage, { hangupAfterMs: MB_HANGUP_GRACE_MS });
         }
         break;
       }
@@ -1206,11 +1273,13 @@ wss.on('connection', (connection, req) => {
         botSpeaking = false;
         hasActiveResponse = false;
         botTurnActive = false;
+
+        // ✅ אם זו סגירה – endCall עם GRACE
         if (pendingHangup && !callEnded) {
           const ph = pendingHangup;
           pendingHangup = null;
-          logInfo(tag, 'Response completed for closing, ending call now.');
-          endCall(ph.reason, ph.closingMessage);
+          logInfo(tag, 'Response completed for closing, ending call (hangup AFTER GRACE).');
+          endCall(ph.reason, ph.closingMessage, { hangupAfterMs: MB_HANGUP_GRACE_MS });
         }
         break;
       }
@@ -1220,9 +1289,21 @@ wss.on('connection', (connection, req) => {
         let t = transcriptRaw.trim();
         if (t) {
           t = t.replace(/\s+/g, ' ').replace(/\s+([,.:;!?])/g, '$1');
+
+          // ✅ dedupe
+          const now = Date.now();
+          if (t === lastUserTranscript && (now - lastUserTranscriptAt) < 800) break;
+          lastUserTranscript = t;
+          lastUserTranscriptAt = now;
+
           conversationLog.push({ from: 'user', text: t });
           logInfo('User', t);
           userHasSpoken = true;
+
+          // ✅ כאן התיקון הקריטי: לגרום לבוט לענות לשאלות
+          if (!callEnded && !pendingHangup) {
+            sendModelPrompt(t, 'user_turn', { includeHistory: true });
+          }
         }
         break;
       }
@@ -1245,7 +1326,7 @@ wss.on('connection', (connection, req) => {
     openAiClosed = true;
     logInfo(tag, 'OpenAI WS closed.');
     if (!callEnded) {
-      endCall('openai_ws_closed', getClosingScript());
+      endCall('openai_ws_closed', getClosingScript(), { hangupAfterMs: 0 });
     }
   });
 
@@ -1256,7 +1337,7 @@ wss.on('connection', (connection, req) => {
       openAiWs.close();
     }
     if (!callEnded) {
-      endCall('openai_ws_error', getClosingScript());
+      endCall('openai_ws_error', getClosingScript(), { hangupAfterMs: 0 });
     }
   });
 
@@ -1281,10 +1362,7 @@ wss.on('connection', (connection, req) => {
       callStartTs = Date.now();
       lastMediaTs = Date.now();
 
-      logInfo(
-        tag,
-        `Twilio stream started. streamSid=${streamSid}, callSid=${callSid}, caller=${callerNumber}`
-      );
+      logInfo(tag, `Twilio stream started. streamSid=${streamSid}, callSid=${callSid}, caller=${callerNumber}`);
 
       idleCheckInterval = setInterval(() => {
         const now = Date.now();
@@ -1301,16 +1379,13 @@ wss.on('connection', (connection, req) => {
       }, 1000);
 
       if (MB_MAX_CALL_MS > 0) {
-        if (
-          MB_MAX_WARN_BEFORE_MS > 0 &&
-          MB_MAX_CALL_MS > MB_MAX_WARN_BEFORE_MS
-        ) {
+        if (MB_MAX_WARN_BEFORE_MS > 0 && MB_MAX_CALL_MS > MB_MAX_WARN_BEFORE_MS) {
           maxCallWarningTimeout = setTimeout(() => {
-            const t =
-              'אנחנו מתקרבים לסיום הזמן לשיחה הזאת. אם תרצו להתקדם, אפשר עכשיו לסכם ולהשאיר פרטים.';
+            const t = 'אנחנו מתקרבים לסיום הזמן לשיחה הזאת. אם תרצו להתקדם, אפשר עכשיו לסכם ולהשאיר פרטים.';
             sendModelPrompt(
               `תני ללקוח משפט קצר בסגנון הבא (אפשר לשנות קצת): "${t}"`,
-              'max_call_warning'
+              'max_call_warning',
+              { includeHistory: true }
             );
           }, MB_MAX_CALL_MS - MB_MAX_WARN_BEFORE_MS);
         }
@@ -1331,11 +1406,12 @@ wss.on('connection', (connection, req) => {
 
       if (!MB_ALLOW_BARGE_IN) {
         if (botTurnActive || botSpeaking || now < noListenUntilTs) {
-          logDebug(
-            'BargeIn',
-            'Ignoring media because bot is speaking / tail (MB_ALLOW_BARGE_IN=false)',
-            { botTurnActive, botSpeaking, now, noListenUntilTs }
-          );
+          logDebug('BargeIn', 'Ignoring media because bot is speaking / tail (MB_ALLOW_BARGE_IN=false)', {
+            botTurnActive,
+            botSpeaking,
+            now,
+            noListenUntilTs
+          });
           return;
         }
       }
@@ -1349,7 +1425,7 @@ wss.on('connection', (connection, req) => {
       logInfo(tag, 'Twilio stream stopped.');
       twilioClosed = true;
       if (!callEnded) {
-        endCall('twilio_stop', getClosingScript());
+        endCall('twilio_stop', getClosingScript(), { hangupAfterMs: 0 });
       }
     }
   });
@@ -1358,7 +1434,7 @@ wss.on('connection', (connection, req) => {
     twilioClosed = true;
     logInfo(tag, 'Twilio WS closed.');
     if (!callEnded) {
-      endCall('twilio_ws_closed', getClosingScript());
+      endCall('twilio_ws_closed', getClosingScript(), { hangupAfterMs: 0 });
     }
   });
 
@@ -1366,7 +1442,7 @@ wss.on('connection', (connection, req) => {
     twilioClosed = true;
     logError(tag, 'Twilio WS error', err);
     if (!callEnded) {
-      endCall('twilio_ws_error', getClosingScript());
+      endCall('twilio_ws_error', getClosingScript(), { hangupAfterMs: 0 });
     }
   });
 });
