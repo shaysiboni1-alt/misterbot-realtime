@@ -111,6 +111,65 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 4500) {
   }
 }
 
+// -----------------------------
+// ✅ FIX #1: Robust JSON parsing for Settings webhook (no ERROR spam)
+// - Make webhooks sometimes return text/plain or slightly malformed JSON.
+// - We try res.json(), then res.text() and parse/repair best-effort.
+// - If still invalid -> just WARN and keep defaults (no breaking).
+// -----------------------------
+function tryExtractFirstJsonObject(text) {
+  if (!text) return null;
+  const s = text.indexOf('{');
+  const e = text.lastIndexOf('}');
+  if (s === -1 || e === -1 || e <= s) return null;
+  return text.slice(s, e + 1);
+}
+
+function bestEffortJsonRepair(text) {
+  // Very small, safe repair: replace `: ,` or `: }` with `: null,` / `: null}`
+  // This targets the common Make-mapping bug where a number field is empty.
+  if (!text) return text;
+  let t = text;
+
+  // remove weird control chars
+  t = t.replace(/\u0000/g, '');
+
+  // fix `": ,` or `":}` etc. (for empty mapped values)
+  t = t.replace(/:\s*(,|\})/g, ': null$1');
+
+  return t;
+}
+
+async function safeReadJsonResponse(res) {
+  // 1) try native JSON
+  try {
+    const j = await res.json();
+    if (j && typeof j === 'object') return j;
+  } catch (e) {
+    // ignore and fall back
+  }
+
+  // 2) try text + parse
+  let raw = '';
+  try {
+    raw = await res.text();
+  } catch (e) {
+    return { __invalid: true, __raw: null };
+  }
+
+  const extracted = tryExtractFirstJsonObject(raw) || raw;
+  const repaired = bestEffortJsonRepair(extracted);
+
+  try {
+    const j = JSON.parse(repaired);
+    if (j && typeof j === 'object') return j;
+  } catch (e) {
+    return { __invalid: true, __raw: raw };
+  }
+
+  return { __invalid: true, __raw: raw };
+}
+
 async function refreshRemoteSettings(tag = 'Settings') {
   if (!MB_SETTINGS_API_URL) return;
 
@@ -136,9 +195,13 @@ async function refreshRemoteSettings(tag = 'Settings') {
       return;
     }
 
-    const data = await res.json().catch(() => null);
-    if (!data || typeof data !== 'object') {
-      console.error(`[ERROR][${tag}] Settings webhook returned invalid JSON.`);
+    const data = await safeReadJsonResponse(res);
+
+    if (!data || typeof data !== 'object' || data.__invalid) {
+      // ✅ no ERROR — keep defaults, just WARN once per call
+      const raw = data && data.__raw ? String(data.__raw).slice(0, 800) : '';
+      console.log(`[WARN][${tag}] Settings webhook returned non-JSON/invalid JSON. Using defaults. raw=${raw}`);
+      lastSettingsFetchAt = Date.now();
       return;
     }
 
@@ -672,8 +735,12 @@ wss.on('connection', (connection, req) => {
   let idleHangupScheduled = false;
   let maxCallTimeout = null;
   let maxCallWarningTimeout = null;
-  let pendingHangup = null; // { reason, closingMessage }
-  let hangupGraceTimer = null; // ✅ NEW: single timer owner for GRACE
+
+  // ✅ FIX #2: Always hang up AFTER GRACE (not immediately on closing done)
+  // pendingHangup structure:
+  // { reason, closingMessage, graceMs, graceTimer, closingFinished }
+  let pendingHangup = null;
+
   let openAiReady = false;
   let twilioClosed = false;
   let openAiClosed = false;
@@ -685,6 +752,15 @@ wss.on('connection', (connection, req) => {
   let noListenUntilTs = 0;
 
   let leadWebhookSent = false;
+
+  // -----------------------------
+  // Helper: GRACE calculator (kept same limits)
+  // -----------------------------
+  function getGraceMs() {
+    const rawGrace =
+      MB_HANGUP_GRACE_MS && MB_HANGUP_GRACE_MS > 0 ? MB_HANGUP_GRACE_MS : 3000;
+    return Math.max(2000, Math.min(rawGrace, 8000));
+  }
 
   // -----------------------------
   // Helper: שליחת טקסט למודל עם הגנה על response כפול
@@ -756,7 +832,9 @@ wss.on('connection', (connection, req) => {
         ended_at: endedAt,
         duration_sec: durationSec,
         caller_id: callerNumber || null,
-        collected_phone: collectedPhone ? (collectedPhone.startsWith('0') ? `+972${collectedPhone.slice(1)}` : collectedPhone) : (callerNumber || null),
+        collected_phone: collectedPhone
+          ? (collectedPhone.startsWith('0') ? `+972${collectedPhone.slice(1)}` : collectedPhone)
+          : (callerNumber || null),
         contact_name: parsedLead?.full_name || null,
         call_status: mapCallStatus(reason),
         last_user_utterance: lastUser || null,
@@ -917,7 +995,7 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: סיום שיחה מרוכז – ניתוק אחרי סגיר
+  // Helper: סיום שיחה מרוכז – ניתוק בפועל מתבצע כאן
   // -----------------------------
   async function endCall(reason, closingMessage) {
     if (callEnded) {
@@ -926,19 +1004,18 @@ wss.on('connection', (connection, req) => {
     }
     callEnded = true;
 
-    // ✅ clear grace timer (avoid duplicates)
-    if (hangupGraceTimer) {
-      clearTimeout(hangupGraceTimer);
-      hangupGraceTimer = null;
-    }
-    pendingHangup = null;
-
     logInfo(tag, `endCall called with reason="${reason}"`);
     logInfo(tag, 'Final conversation log:', conversationLog);
 
     if (idleCheckInterval) clearInterval(idleCheckInterval);
     if (maxCallTimeout) clearTimeout(maxCallTimeout);
     if (maxCallWarningTimeout) clearTimeout(maxCallWarningTimeout);
+
+    // clear pending grace timer if exists
+    if (pendingHangup && pendingHangup.graceTimer) {
+      clearTimeout(pendingHangup.graceTimer);
+      pendingHangup.graceTimer = null;
+    }
 
     const effectiveClosing = closingMessage || getClosingScript();
 
@@ -952,29 +1029,29 @@ wss.on('connection', (connection, req) => {
       }
     } catch (e) {}
 
-    // ✅ Call Log webhook (fire-and-forget, does not block hangup)
+    // ✅ Call Log webhook (fire-and-forget)
     sendCallLogWebhook({ reason, closingMessage: effectiveClosing, parsedLead: parsedLeadForLog }).catch(() => {});
 
-    // לא מחכים ל-webhook – שולחים בפייר אנד פורגט (אם יש ליד מלא)
+    // Lead webhook (keep as-is)
     if (MB_ENABLE_LEAD_CAPTURE && MB_WEBHOOK_URL) {
       sendLeadWebhook(reason, effectiveClosing).catch((err) =>
         logError(tag, 'sendLeadWebhook fire-and-forget error', err)
       );
     }
 
-    // ריענון KB דינאמי אחרי סיום שיחה
+    // refresh KB post-call
     if (MB_DYNAMIC_KB_URL) {
       refreshDynamicBusinessPrompt('PostCall').catch((err) =>
         logError(tag, 'DynamicKB post-call refresh failed', err)
       );
     }
 
-    // ניתוק אקטיבי בטוויליו (סיום שיחה פיזית)
+    // ✅ Force hangup via Twilio API
     if (callSid) {
       hangupTwilioCall(callSid, tag).catch(() => {});
     }
 
-    // סוגרים OpenAI ו-Twilio WS
+    // Close sockets
     if (!openAiClosed && openAiWs.readyState === WebSocket.OPEN) {
       openAiClosed = true;
       openAiWs.close();
@@ -991,31 +1068,9 @@ wss.on('connection', (connection, req) => {
     noListenUntilTs = 0;
   }
 
-  function armGraceHangup(reason, closingMessage) {
-    if (callEnded) return;
-    if (!pendingHangup) return;
-
-    const rawGrace =
-      MB_HANGUP_GRACE_MS && MB_HANGUP_GRACE_MS > 0 ? MB_HANGUP_GRACE_MS : 3000;
-    const graceMs = Math.max(2000, Math.min(rawGrace, 8000));
-
-    if (hangupGraceTimer) {
-      // already armed
-      return;
-    }
-
-    hangupGraceTimer = setTimeout(() => {
-      if (callEnded || !pendingHangup) return;
-      const ph = pendingHangup;
-      pendingHangup = null;
-      hangupGraceTimer = null;
-      logInfo(tag, `Hangup grace reached (${graceMs} ms), forcing endCall.`);
-      endCall(ph.reason || reason, ph.closingMessage || closingMessage);
-    }, graceMs);
-
-    logInfo(tag, `GRACE armed (${graceMs} ms) reason="${reason}".`);
-  }
-
+  // -----------------------------
+  // ✅ FIX #2: schedule endCall ONLY after GRACE in ALL closing paths
+  // -----------------------------
   function scheduleEndCall(reason, closingMessage) {
     if (callEnded) return;
 
@@ -1026,8 +1081,16 @@ wss.on('connection', (connection, req) => {
       return;
     }
 
-    logInfo(tag, `scheduleEndCall invoked. reason="${reason}", closingMessage="${msg}"`);
-    pendingHangup = { reason, closingMessage: msg };
+    const graceMs = getGraceMs();
+    logInfo(tag, `scheduleEndCall invoked. reason="${reason}", closingMessage="${msg}", graceMs=${graceMs}`);
+
+    pendingHangup = {
+      reason,
+      closingMessage: msg,
+      graceMs,
+      closingFinished: false,
+      graceTimer: null
+    };
 
     if (openAiWs.readyState === WebSocket.OPEN) {
       sendModelPrompt(
@@ -1036,18 +1099,23 @@ wss.on('connection', (connection, req) => {
       );
       logInfo(tag, `Closing message sent to model: ${msg}`);
     } else {
-      // if we can't speak, still enforce grace-based hangup
-      armGraceHangup(reason, msg);
+      // cannot speak closing -> end immediately
+      const ph = pendingHangup;
+      pendingHangup = null;
+      endCall(ph.reason, ph.closingMessage);
       return;
     }
 
-    // ✅ ALWAYS hangup after GRACE (even if audio finishes earlier)
-    armGraceHangup(reason, msg);
+    // ✅ Always enforce hangup AFTER GRACE (even if closing finished early)
+    pendingHangup.graceTimer = setTimeout(() => {
+      if (callEnded || !pendingHangup) return;
+      const ph = pendingHangup;
+      pendingHangup = null;
+      logInfo(tag, `Grace timer reached (${graceMs} ms), forcing endCall.`);
+      endCall(ph.reason, ph.closingMessage);
+    }, graceMs);
 
-    logInfo(
-      tag,
-      `scheduleEndCall: hangup scheduled (GRACE) with reason="${reason}".`
-    );
+    logInfo(tag, `scheduleEndCall: hangup scheduled AFTER GRACE (${graceMs} ms).`);
   }
 
   function scheduleHangupAfterBotClosing(reason) {
@@ -1058,15 +1126,25 @@ wss.on('connection', (connection, req) => {
     }
 
     const msg = getClosingScript();
-    pendingHangup = { reason, closingMessage: msg };
+    const graceMs = getGraceMs();
 
-    // ✅ ALWAYS hangup after GRACE
-    armGraceHangup(reason, msg);
+    pendingHangup = {
+      reason,
+      closingMessage: msg,
+      graceMs,
+      closingFinished: true,
+      graceTimer: null
+    };
 
-    logInfo(
-      tag,
-      `Bot closing detected – hangup scheduled (GRACE) reason="${reason}".`
-    );
+    pendingHangup.graceTimer = setTimeout(() => {
+      if (callEnded || !pendingHangup) return;
+      const ph = pendingHangup;
+      pendingHangup = null;
+      logInfo(tag, `Grace timer (bot closing) reached (${graceMs} ms), forcing endCall.`);
+      endCall(ph.reason, ph.closingMessage);
+    }, graceMs);
+
+    logInfo(tag, `Bot closing detected – hangup scheduled AFTER GRACE (${graceMs} ms) reason="${reason}".`);
   }
 
   function checkBotClosing(botText) {
@@ -1202,10 +1280,11 @@ wss.on('connection', (connection, req) => {
         botSpeaking = false;
         botTurnActive = false;
 
-        // ✅ FIX: אם מדובר בסגיר - לא מנתקים מייד. תמיד מחכים GRACE ואז endCall.
+        // ✅ FIX #2: DO NOT endCall immediately.
+        // We ALWAYS wait GRACE timer to trigger endCall.
         if (pendingHangup && !callEnded) {
-          logInfo(tag, 'Closing audio finished, waiting GRACE before endCall.');
-          armGraceHangup(pendingHangup.reason, pendingHangup.closingMessage);
+          pendingHangup.closingFinished = true;
+          logInfo(tag, `Closing audio finished. Waiting GRACE=${pendingHangup.graceMs}ms before hangup.`);
         }
         break;
       }
@@ -1215,10 +1294,10 @@ wss.on('connection', (connection, req) => {
         hasActiveResponse = false;
         botTurnActive = false;
 
-        // ✅ FIX: גם כאן לא מנתקים מייד. תמיד מחכים GRACE.
+        // ✅ FIX #2: DO NOT endCall immediately.
         if (pendingHangup && !callEnded) {
-          logInfo(tag, 'Response completed for closing, waiting GRACE before endCall.');
-          armGraceHangup(pendingHangup.reason, pendingHangup.closingMessage);
+          pendingHangup.closingFinished = true;
+          logInfo(tag, `Response completed for closing. Waiting GRACE=${pendingHangup.graceMs}ms before hangup.`);
         }
         break;
       }
@@ -1284,7 +1363,6 @@ wss.on('connection', (connection, req) => {
     if (event === 'start') {
       streamSid = msg.start?.streamSid || null;
       callSid = msg.start?.callSid || null;
-      connection._caller = msg.start?.customParameters?.caller || null;
       callerNumber = msg.start?.customParameters?.caller || null;
       callStartTs = Date.now();
       lastMediaTs = Date.now();
