@@ -74,6 +74,112 @@ const MB_SPEECH_SPEED = envNumber('MB_SPEECH_SPEED', 1.15);
 
 const OPENAI_VOICE = process.env.OPENAI_VOICE || 'alloy';
 
+// -----------------------------
+// ✅ Dashboard / Make webhooks (NEW – safe layer)
+// -----------------------------
+const MB_SETTINGS_API_URL = process.env.MB_SETTINGS_API_URL || ''; // Scenario: neta_settings_api (optional)
+const MB_CALL_LOG_WEBHOOK_URL = process.env.MB_CALL_LOG_WEBHOOK_URL || ''; // Scenario: neta_call_log (required for Airtable logs)
+const MB_CALL_LOG_ENABLED = envBool(
+  'MB_CALL_LOG_ENABLED',
+  !!MB_CALL_LOG_WEBHOOK_URL
+);
+const MB_SETTINGS_MIN_INTERVAL_MS = envNumber(
+  'MB_SETTINGS_MIN_INTERVAL_MS',
+  60 * 1000
+);
+
+// cache for remote settings (does NOT break if empty)
+let remoteSettings = {
+  bot_name: BOT_NAME,
+  opening_script: null,
+  closing_script: null,
+  master_prompt: null,
+  business_prompt: null,
+  // You can optionally pass other fields from Airtable like:
+  // openai_voice, speech_speed, business_kb_url ...
+  openai_voice: null,
+  speech_speed: null
+};
+let lastSettingsFetchAt = 0;
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 4500) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: ctrl.signal });
+    return res;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function refreshRemoteSettings(tag = 'Settings') {
+  if (!MB_SETTINGS_API_URL) return;
+
+  const now = Date.now();
+  if (tag !== 'Startup' && now - lastSettingsFetchAt < MB_SETTINGS_MIN_INTERVAL_MS) {
+    return;
+  }
+
+  try {
+    const res = await fetchWithTimeout(
+      MB_SETTINGS_API_URL,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bot_name: BOT_NAME })
+      },
+      4500
+    );
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      console.error(`[ERROR][${tag}] Settings webhook HTTP ${res.status}`, txt);
+      return;
+    }
+
+    const data = await res.json().catch(() => null);
+    if (!data || typeof data !== 'object') {
+      console.error(`[ERROR][${tag}] Settings webhook returned invalid JSON.`);
+      return;
+    }
+
+    // Accept both flattened or { settings: {...} } responses
+    const s = data.settings && typeof data.settings === 'object' ? data.settings : data;
+
+    remoteSettings = {
+      ...remoteSettings,
+      bot_name: s.bot_name || BOT_NAME,
+      opening_script: s.opening_script ?? remoteSettings.opening_script,
+      closing_script: s.closing_script ?? remoteSettings.closing_script,
+      master_prompt: s.master_prompt ?? remoteSettings.master_prompt,
+      business_prompt: s.business_prompt ?? remoteSettings.business_prompt,
+      openai_voice: s.openai_voice ?? remoteSettings.openai_voice,
+      speech_speed: s.speech_speed ?? remoteSettings.speech_speed
+    };
+
+    lastSettingsFetchAt = Date.now();
+    console.log(`[INFO][${tag}] Remote settings loaded/updated.`);
+  } catch (err) {
+    console.error(`[ERROR][${tag}] Failed to refresh remote settings`, err);
+  }
+}
+
+function getOpeningScript() {
+  return (remoteSettings.opening_script || '').trim() || MB_OPENING_SCRIPT;
+}
+function getClosingScript() {
+  return (remoteSettings.closing_script || '').trim() || MB_CLOSING_SCRIPT;
+}
+function getEffectiveOpenAiVoice() {
+  return (remoteSettings.openai_voice || '').trim() || OPENAI_VOICE;
+}
+function getEffectiveSpeechSpeed() {
+  const v = Number(remoteSettings.speech_speed);
+  if (Number.isFinite(v) && v > 0) return v;
+  return MB_SPEECH_SPEED;
+}
+
 // ניהול נכון של MAX_OUTPUT_TOKENS – תמיד מספר או "inf"
 const MAX_OUTPUT_TOKENS_ENV = process.env.MAX_OUTPUT_TOKENS;
 let MAX_OUTPUT_TOKENS = 'inf';
@@ -95,7 +201,6 @@ function normalizeForClosing(text) {
     .replace(/\s+/g, ' ')
     .trim();
 }
-const NORMALIZED_CLOSING_SCRIPT = normalizeForClosing(MB_CLOSING_SCRIPT);
 
 // VAD – ברירות מחדל מחוזקות לרעשי רקע
 const MB_VAD_THRESHOLD = envNumber('MB_VAD_THRESHOLD', 0.65);
@@ -224,23 +329,19 @@ function normalizePhoneNumber(rawPhone, callerNumber) {
 
   function normalize972(digits) {
     if (digits.startsWith('972') && (digits.length === 11 || digits.length === 12)) {
-      // גם לנייד (12) וגם לנייח (11) – משאירים את המספר אחרי 972 ומוסיפים 0
       return '0' + digits.slice(3);
     }
     return digits;
   }
 
   function isValidIsraeliPhone(digits) {
-    if (!/^0\d{8,9}$/.test(digits)) return false; // 9 או 10 ספרות, מתחיל ב-0
+    if (!/^0\d{8,9}$/.test(digits)) return false;
     const prefix2 = digits.slice(0, 2);
 
     if (digits.length === 9) {
-      // נייחים קלאסיים
       return ['02', '03', '04', '07', '08', '09'].includes(prefix2);
     } else {
-      // 10 ספרות – ניידים/07 וכדומה
       if (prefix2 === '05' || prefix2 === '07') return true;
-      // ליתר ביטחון נאפשר גם 02/03/04/08/09 עם 10 ספרות
       if (['02', '03', '04', '07', '08', '09'].includes(prefix2)) return true;
       return false;
     }
@@ -266,13 +367,6 @@ function normalizePhoneNumber(rawPhone, callerNumber) {
 // -----------------------------
 // System instructions builder
 // -----------------------------
-//
-// 🔥 מכאן ואילך – כל הטקסט של הפרומפט מגיע מה-ENV בלבד:
-// MB_GENERAL_PROMPT + (אופציונלי) MB_BUSINESS_PROMPT + dynamicBusinessPrompt.
-// אין יותר "פרומפט ענק" קשיח בתוך הקוד.
-//
-
-// חוקים קבועים למודל – כדי שלא ידבר על רעשי רקע ושלא יסיים שיחה לבד לפי מילים
 const EXTRA_BEHAVIOR_RULES = `
 חוקי מערכת קבועים (גבוהים מהפרומפט העסקי):
 1. אל תתייחסי למוזיקה, רעשים או איכות הקו, גם אם את מזהה אותם. התייחסי רק לתוכן מילולי שנשמע כמו דיבור מכוון אלייך. אם לא הבנת משפט – אמרי בקצרה משהו כמו: "לא שמעתי טוב, אפשר לחזור על זה?" בלי לתאר את הרעש.
@@ -287,21 +381,20 @@ function buildSystemInstructions() {
   const staticKb = (MB_BUSINESS_PROMPT || '').trim();
   const dynamicKb = (dynamicBusinessPrompt || '').trim();
 
+  // ✅ Remote settings prompts (optional, SAFE)
+  const remoteMaster = (remoteSettings.master_prompt || '').trim();
+  const remoteBiz = (remoteSettings.business_prompt || '').trim();
+
   let instructions = '';
 
-  if (base) {
-    instructions += base;
-  }
+  if (base) instructions += base;
+  if (remoteMaster) instructions += (instructions ? '\n\n' : '') + remoteMaster;
 
-  if (staticKb) {
-    instructions += (instructions ? '\n\n' : '') + staticKb;
-  }
+  if (staticKb) instructions += (instructions ? '\n\n' : '') + staticKb;
+  if (remoteBiz) instructions += (instructions ? '\n\n' : '') + remoteBiz;
 
-  if (dynamicKb) {
-    instructions += (instructions ? '\n\n' : '') + dynamicKb;
-  }
+  if (dynamicKb) instructions += (instructions ? '\n\n' : '') + dynamicKb;
 
-  // אם לא הוגדר שום דבר ב-ENV – שיהיה משהו מינימלי בלבד
   if (!instructions) {
     instructions = `
 אתם עוזר קולי בזמן אמת בשם "${BOT_NAME}" עבור שירות "${BUSINESS_NAME}".
@@ -309,9 +402,7 @@ function buildSystemInstructions() {
 `.trim();
   }
 
-  // מוסיפים תמיד את חוקי ההתנהגות הקבועים
   instructions += '\n\n' + EXTRA_BEHAVIOR_RULES;
-
   return instructions;
 }
 
@@ -322,14 +413,12 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// Twilio Voice webhook – מחזיר TwiML שמחבר את השיחה ל־Media Streams
 app.post('/twilio-voice', (req, res) => {
   const host = process.env.DOMAIN || req.headers.host;
   const wsUrl =
     process.env.MB_TWILIO_STREAM_URL ||
     `wss://${host.replace(/^https?:\/\//, '')}/twilio-media-stream`;
 
-  // {{trigger.call.From}} של טוויליו = req.body.From כאן
   const caller = req.body.From || '';
 
   const twiml = `
@@ -395,22 +484,6 @@ async function extractLeadFromConversation(conversationLog) {
   "reason": string | null,
   "notes": string | null
 }
-
-הסברים:
-- "is_lead": true אם ברור שיש כאן פנייה עסקית / התעניינות אמיתית בשירות / הזמנת שירות. אחרת false.
-- "lead_type": "new" אם מדובר בלקוח חדש, "existing" אם הוא מציין שהוא לקוח קיים, אחרת "unknown".
-- "full_name": אם הלקוח נותן שם (פרטי או מלא) – כתוב כפי שנשמע. אם השם נאמר בעברית, כתוב אותו באותיות עבריות ולא באנגלית. אם לא ברור – null.
-- "business_name": אם הלקוח מזכיר שם עסק – כתוב כפי שנשמע. אם שם העסק נאמר בעברית, כתוב אותו באותיות עבריות ולא באנגלית. אחרת null.
-- "phone_number": אם בשיחה מופיע מספר טלפון של הלקוח – החזר אותו כרצף ספרות בלבד, בלי רווחים ובלי +972 ובלי להוריד 0 בהתחלה.
-  אם נשמעים כמה מספרים – בחר את המספר הרלוונטי ביותר ליצירת קשר, אחרת null.
-  אל תוסף ספרות שלא נאמרו, ואל תנחש מספר אם לא ברור.
-  אם המספר שנשמע אינו באורך 10 ספרות או 9 ספרות, או שאינו מתחיל בקידומת תקינה – עדיף להחזיר phone_number: null.
-- "reason": תיאור קצר וקולע בעברית של סיבת הפנייה (משפט אחד קצר).
-- "notes": כל דבר נוסף שיכול להיות רלוונטי לאיש מכירות / שירות (למשל: "מעוניין בדמו לבוט קולי", "פנייה דחופה", "שאל על מחירים" וכו').
-
-חשוב:
-- אם נראה שהשיחה היא רק הדגמה / סימולציה / תיאור של תסריט דוגמה לבוט קולי, ולא פנייה אמיתית של לקוח – החזר "is_lead": false ו-"phone_number": null.
-- אם רוב השיחה היא בעברית – העדף עברית בכל השדות הטקסטואליים (reason, notes, שמות אם נאמרו בעברית וכו').
 
 החזר אך ורק JSON תקין לפי הסכמה, בלי טקסט נוסף, בלי הסברים ובלי הערות.
 `.trim();
@@ -573,10 +646,14 @@ wss.on('connection', (connection, req) => {
     return;
   }
 
-  const instructions = buildSystemInstructions();
+  // ✅ refresh settings in background (safe, non-blocking)
+  refreshRemoteSettings('OnConnect').catch(() => {});
+
   let streamSid = null;
   let callSid = null;
   let callerNumber = null;
+
+  const instructions = buildSystemInstructions();
 
   const openAiWs = new WebSocket(
     'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17',
@@ -597,28 +674,18 @@ wss.on('connection', (connection, req) => {
   let idleHangupScheduled = false;
   let maxCallTimeout = null;
   let maxCallWarningTimeout = null;
-  let pendingHangup = null;    // { reason, closingMessage }
+  let pendingHangup = null; // { reason, closingMessage }
   let openAiReady = false;
   let twilioClosed = false;
   let openAiClosed = false;
   let callEnded = false;
 
-  // מצב דיבור של הבוט (לצורך barge-in)
   let botSpeaking = false;
-
-  // האם יש response פעיל במודל
   let hasActiveResponse = false;
-
-  // דגל: האם זה עדיין "התור של הבוט"
   let botTurnActive = false;
-
-  // טיימסטמפ עד מתי אסור להקשיב ללקוח (זנב קצר אחרי סיום דיבור)
   let noListenUntilTs = 0;
-
-  // האם הלקוח כבר דיבר פעם אחת (לשימוש עתידי, כרגע barge-in רך)
   let userHasSpoken = false;
 
-  // האם וובהוק לידים כבר נשלח בשיחה הזו
   let leadWebhookSent = false;
 
   // -----------------------------
@@ -648,18 +715,78 @@ wss.on('connection', (connection, req) => {
     openAiWs.send(JSON.stringify(item));
     openAiWs.send(JSON.stringify({ type: 'response.create' }));
     hasActiveResponse = true;
-    botTurnActive = true;   // מרגע זה – זה "התור של הבוט"
+    botTurnActive = true;
     logInfo(tag, `Sending model prompt (${purpose || 'no-tag'})`);
   }
 
-  // -----------------------------
-  // Helper: האם הלקוח הזכיר מזוהה
-  // -----------------------------
   function conversationMentionsCallerId() {
     const patterns = [/מזוהה/, /למספר שממנו/, /למספר שממנו אני מתקשר/, /למספר שממנו התקשרתי/];
     return conversationLog.some(
       (m) => m.from === 'user' && patterns.some((re) => re.test(m.text || ''))
     );
+  }
+
+  // -----------------------------
+  // ✅ Dashboard helper: Send Call Log webhook (NEW)
+  // -----------------------------
+  function mapCallStatus(reason) {
+    const r = String(reason || '').toLowerCase();
+    if (r.includes('error')) return 'error';
+    if (r.includes('twilio') || r.includes('ws_closed') || r.includes('stop')) return 'abandoned';
+    return 'completed';
+  }
+
+  async function sendCallLogWebhook({ reason, closingMessage, parsedLead }) {
+    if (!MB_CALL_LOG_ENABLED || !MB_CALL_LOG_WEBHOOK_URL) return;
+
+    try {
+      const endedAt = new Date().toISOString();
+      const startedAt = new Date(callStartTs).toISOString();
+      const durationSec = Math.max(0, Math.round((Date.now() - callStartTs) / 1000));
+
+      const lastUser = [...conversationLog].reverse().find((m) => m.from === 'user')?.text || '';
+      const transcript = conversationLog
+        .map((m) => `${m.from === 'user' ? 'לקוח' : BOT_NAME}: ${m.text}`)
+        .join('\n');
+
+      const callerDigits = normalizePhoneNumber(null, callerNumber);
+      const collectedPhone = normalizePhoneNumber(parsedLead?.phone_number, callerNumber);
+
+      const payload = {
+        // ✅ fields that you already created in Airtable
+        call_id: callSid || streamSid || `call_${Date.now()}`,
+        call_direction: 'inbound',
+        started_at: startedAt,
+        ended_at: endedAt,
+        duration_sec: durationSec,
+        caller_id: callerNumber || null,
+        collected_phone: collectedPhone ? (collectedPhone.startsWith('0') ? `+972${collectedPhone.slice(1)}` : collectedPhone) : (callerNumber || null),
+        contact_name: parsedLead?.full_name || null,
+        call_status: mapCallStatus(reason),
+        last_user_utterance: lastUser || null,
+        transcript,
+        summary: parsedLead?.reason || null,
+        has_lead: parsedLead?.is_lead === true
+      };
+
+      // add extra safe fields (won't break Make; just available if you map)
+      payload.lead_type = parsedLead?.lead_type || null;
+      payload.lead_notes = parsedLead?.notes || null;
+      payload.reason = reason || null;
+      payload.streamSid = streamSid || null;
+
+      await fetchWithTimeout(
+        MB_CALL_LOG_WEBHOOK_URL,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        },
+        4500
+      ).catch(() => {});
+    } catch (err) {
+      logError(tag, 'sendCallLogWebhook error', err);
+    }
   }
 
   // -----------------------------
@@ -677,7 +804,6 @@ wss.on('connection', (connection, req) => {
     }
 
     try {
-      // אם משום מה callerNumber ריק – נשלוף אותו מטוויליו לפי callSid (אותו From של {{trigger.call.From}})
       if (!callerNumber && callSid) {
         const resolved = await fetchCallerNumberFromTwilio(callSid, tag);
         if (resolved) {
@@ -692,7 +818,6 @@ wss.on('connection', (connection, req) => {
         return;
       }
 
-      // כלל: אם אין טלפון מה-LLM – תמיד ננסה להשלים אותו מהמזוהה.
       if (!parsedLead.phone_number && callerNumber) {
         parsedLead.phone_number = callerNumber;
 
@@ -706,23 +831,19 @@ wss.on('connection', (connection, req) => {
           suffixNote;
       }
 
-      // נורמליזציה של מספר הטלפון שנאסף
       const normalizedPhone = normalizePhoneNumber(
         parsedLead.phone_number,
         callerNumber
       );
       parsedLead.phone_number = normalizedPhone;
 
-      // חשוב: גם caller_id_raw וגם CALLERID יהיו בלי +972, בפורמט 0XXXXXXXXX/0XXXXXXXX
       const callerDigits = normalizePhoneNumber(null, callerNumber);
-
       const callerIdRaw = callerDigits || (callerNumber ? String(callerNumber).replace(/\D/g, '') : null);
       const callerIdNormalized = callerDigits || callerIdRaw;
 
       parsedLead.caller_id_raw = callerIdRaw;
       parsedLead.caller_id_normalized = callerIdNormalized;
 
-      // חובה: business_name תמיד מלא
       if (
         !parsedLead.business_name ||
         typeof parsedLead.business_name !== 'string' ||
@@ -731,12 +852,10 @@ wss.on('connection', (connection, req) => {
         parsedLead.business_name = 'לא רלוונטי';
       }
 
-      // ❗ לוגיקה: כל ליד אמיתי עם טלפון → וובהוק
       const isFullLead =
         parsedLead.is_lead === true &&
         !!parsedLead.phone_number;
 
-      // 👉 שולחים וובהוק רק אם זה "ליד מלא" (יש טלפון והוא באמת ליד).
       if (!isFullLead) {
         logInfo(tag, 'Parsed lead is NOT full lead – webhook will NOT be sent.', {
           is_lead: parsedLead.is_lead,
@@ -746,13 +865,11 @@ wss.on('connection', (connection, req) => {
         return;
       }
 
-      // phone_number = מספר לחזרה בפועל
       const finalPhoneNumber =
         parsedLead.phone_number ||
         callerIdNormalized ||
         callerIdRaw;
 
-      // CALLERID = תמיד המזוהה בפורמט ישראלי (ללא +972)
       const finalCallerId =
         callerIdNormalized ||
         callerIdRaw ||
@@ -765,7 +882,6 @@ wss.on('connection', (connection, req) => {
         callerIdRaw,
         callerIdNormalized,
 
-        // שני הפרמטרים שביקשת במפורש:
         phone_number: finalPhoneNumber,
         CALLERID: finalCallerId,
 
@@ -787,7 +903,6 @@ wss.on('connection', (connection, req) => {
         CALLERID: finalCallerId
       });
 
-      // חוק: פעם אחת בלבד לכל שיחה
       leadWebhookSent = true;
 
       const res = await fetch(MB_WEBHOOK_URL, {
@@ -809,7 +924,7 @@ wss.on('connection', (connection, req) => {
   // -----------------------------
   // Helper: סיום שיחה מרוכז – ניתוק אחרי סגיר
   // -----------------------------
-  function endCall(reason, closingMessage) {
+  async function endCall(reason, closingMessage) {
     if (callEnded) {
       logDebug(tag, `endCall called again (${reason}) – already ended.`);
       return;
@@ -823,9 +938,25 @@ wss.on('connection', (connection, req) => {
     if (maxCallTimeout) clearTimeout(maxCallTimeout);
     if (maxCallWarningTimeout) clearTimeout(maxCallWarningTimeout);
 
+    const effectiveClosing = closingMessage || getClosingScript();
+
+    // ✅ lead parsing once here (for call log + optional lead webhook)
+    let parsedLeadForLog = null;
+    try {
+      parsedLeadForLog = await extractLeadFromConversation(conversationLog);
+      // complete phone via caller id if needed
+      if (parsedLeadForLog && typeof parsedLeadForLog === 'object') {
+        const normalized = normalizePhoneNumber(parsedLeadForLog.phone_number, callerNumber);
+        parsedLeadForLog.phone_number = normalized || parsedLeadForLog.phone_number || null;
+      }
+    } catch (e) {}
+
+    // ✅ Call Log webhook (fire-and-forget, does not block hangup)
+    sendCallLogWebhook({ reason, closingMessage: effectiveClosing, parsedLead: parsedLeadForLog }).catch(() => {});
+
     // לא מחכים ל-webhook – שולחים בפייר אנד פורגט (אם יש ליד מלא)
     if (MB_ENABLE_LEAD_CAPTURE && MB_WEBHOOK_URL) {
-      sendLeadWebhook(reason, closingMessage || MB_CLOSING_SCRIPT).catch((err) =>
+      sendLeadWebhook(reason, effectiveClosing).catch((err) =>
         logError(tag, 'sendLeadWebhook fire-and-forget error', err)
       );
     }
@@ -859,13 +990,10 @@ wss.on('connection', (connection, req) => {
     noListenUntilTs = 0;
   }
 
-  // -----------------------------
-  // Helper: תזמון סיום שיחה אחרי סגיר – לגרסאות שבהן אנחנו מבקשים מהמודל לומר את משפט הסיום
-  // -----------------------------
   function scheduleEndCall(reason, closingMessage) {
     if (callEnded) return;
 
-    const msg = closingMessage || MB_CLOSING_SCRIPT;
+    const msg = closingMessage || getClosingScript();
 
     if (pendingHangup) {
       logDebug(tag, 'Hangup already scheduled, skipping duplicate.');
@@ -875,7 +1003,6 @@ wss.on('connection', (connection, req) => {
     logInfo(tag, `scheduleEndCall invoked. reason="${reason}", closingMessage="${msg}"`);
     pendingHangup = { reason, closingMessage: msg };
 
-    // שולחים לבוט לומר את משפט הסגירה
     if (openAiWs.readyState === WebSocket.OPEN) {
       sendModelPrompt(
         `סיימי את השיחה עם הלקוח במשפט הבא בלבד, בלי להוסיף שום משפט נוסף: "${msg}"`,
@@ -883,7 +1010,6 @@ wss.on('connection', (connection, req) => {
       );
       logInfo(tag, `Closing message sent to model: ${msg}`);
     } else {
-      // אם אין חיבור למודל – מנתקים מיד בלי לחכות
       const ph = pendingHangup;
       pendingHangup = null;
       endCall(ph.reason, ph.closingMessage);
@@ -892,11 +1018,8 @@ wss.on('connection', (connection, req) => {
 
     const rawGrace =
       MB_HANGUP_GRACE_MS && MB_HANGUP_GRACE_MS > 0 ? MB_HANGUP_GRACE_MS : 3000;
-
-    // לא מאפשרים ערכים קיצוניים – תמיד בין 2 ל-8 שניות
     const graceMs = Math.max(2000, Math.min(rawGrace, 8000));
 
-    // fallback: אם משום מה לא קיבלנו response.audio.done / response.completed
     setTimeout(() => {
       if (callEnded || !pendingHangup) return;
       const ph = pendingHangup;
@@ -911,9 +1034,6 @@ wss.on('connection', (connection, req) => {
     );
   }
 
-  // -----------------------------
-  // Helper: תזמון ניתוק כאשר הבוט כבר אמר את משפט הסיום (לפי MB_CLOSING_SCRIPT בלבד)
-  // -----------------------------
   function scheduleHangupAfterBotClosing(reason) {
     if (callEnded) return;
     if (pendingHangup) {
@@ -921,7 +1041,7 @@ wss.on('connection', (connection, req) => {
       return;
     }
 
-    const msg = MB_CLOSING_SCRIPT;
+    const msg = getClosingScript();
     pendingHangup = { reason, closingMessage: msg };
     const rawGrace =
       MB_HANGUP_GRACE_MS && MB_HANGUP_GRACE_MS > 0 ? MB_HANGUP_GRACE_MS : 3000;
@@ -941,27 +1061,20 @@ wss.on('connection', (connection, req) => {
     );
   }
 
-  // -----------------------------
-  // Helper: בדיקת משפט סיום של הבוט – **רק** לפי MB_CLOSING_SCRIPT מה-ENV
-  // -----------------------------
   function checkBotClosing(botText) {
-    if (!botText || !NORMALIZED_CLOSING_SCRIPT) return;
+    const closingScript = getClosingScript();
+    const normalizedClosing = normalizeForClosing(closingScript);
+    if (!botText || !normalizedClosing) return;
+
     const norm = normalizeForClosing(botText);
     if (!norm) return;
 
-    // ננתק רק אם משפט הסיום המוגדר ב-ENV מופיע בצורה ברורה בטקסט
-    if (
-      norm.includes(NORMALIZED_CLOSING_SCRIPT) ||
-      NORMALIZED_CLOSING_SCRIPT.includes(norm)
-    ) {
+    if (norm.includes(normalizedClosing) || normalizedClosing.includes(norm)) {
       logInfo(tag, `Detected configured bot closing phrase in output: "${botText}"`);
       scheduleHangupAfterBotClosing('bot_closing_config');
     }
   }
 
-  // -----------------------------
-  // Helper: הודעת "אתם עדיין איתי?"
-  // -----------------------------
   function sendIdleWarningIfNeeded() {
     if (idleWarningSent || callEnded) return;
     idleWarningSent = true;
@@ -988,7 +1101,7 @@ wss.on('connection', (connection, req) => {
       session: {
         model: 'gpt-4o-realtime-preview-2024-12-17',
         modalities: ['audio', 'text'],
-        voice: OPENAI_VOICE,
+        voice: getEffectiveOpenAiVoice(),
         input_audio_format: 'g711_ulaw',
         output_audio_format: 'g711_ulaw',
         input_audio_transcription: { model: 'whisper-1' },
@@ -1006,7 +1119,7 @@ wss.on('connection', (connection, req) => {
     logDebug(tag, 'Sending session.update to OpenAI.', sessionUpdate);
     openAiWs.send(JSON.stringify(sessionUpdate));
 
-    const greetingText = MB_OPENING_SCRIPT;
+    const greetingText = getOpeningScript();
     sendModelPrompt(
       `פתחי את השיחה עם הלקוח במשפט הבא (אפשר לשנות מעט את הניסוח אבל לא להאריך): "${greetingText}" ואז עצרי והמתיני לתשובה שלו.`,
       'opening_greeting'
@@ -1026,7 +1139,6 @@ wss.on('connection', (connection, req) => {
 
     switch (type) {
       case 'response.created':
-        // כל response חדש – מתחיל "תור" של הבוט
         currentBotText = '';
         hasActiveResponse = true;
         botTurnActive = true;
@@ -1059,7 +1171,6 @@ wss.on('connection', (connection, req) => {
         break;
       }
 
-      // אודיו לבוט → לטוויליו
       case 'response.audio.delta': {
         const b64 = msg.delta;
         if (!b64 || !streamSid) break;
@@ -1134,7 +1245,7 @@ wss.on('connection', (connection, req) => {
     openAiClosed = true;
     logInfo(tag, 'OpenAI WS closed.');
     if (!callEnded) {
-      endCall('openai_ws_closed', MB_CLOSING_SCRIPT);
+      endCall('openai_ws_closed', getClosingScript());
     }
   });
 
@@ -1145,7 +1256,7 @@ wss.on('connection', (connection, req) => {
       openAiWs.close();
     }
     if (!callEnded) {
-      endCall('openai_ws_error', MB_CLOSING_SCRIPT);
+      endCall('openai_ws_error', getClosingScript());
     }
   });
 
@@ -1185,11 +1296,10 @@ wss.on('connection', (connection, req) => {
         if (!idleHangupScheduled && sinceMedia >= MB_IDLE_HANGUP_MS && !callEnded) {
           idleHangupScheduled = true;
           logInfo(tag, 'Idle timeout reached, scheduling endCall.');
-          scheduleEndCall('idle_timeout', MB_CLOSING_SCRIPT);
+          scheduleEndCall('idle_timeout', getClosingScript());
         }
       }, 1000);
 
-      // Max call duration + התראה לפני
       if (MB_MAX_CALL_MS > 0) {
         if (
           MB_MAX_WARN_BEFORE_MS > 0 &&
@@ -1207,7 +1317,7 @@ wss.on('connection', (connection, req) => {
 
         maxCallTimeout = setTimeout(() => {
           logInfo(tag, 'Max call duration reached, scheduling endCall.');
-          scheduleEndCall('max_call_duration', MB_CLOSING_SCRIPT);
+          scheduleEndCall('max_call_duration', getClosingScript());
         }, MB_MAX_CALL_MS);
       }
     } else if (event === 'media') {
@@ -1219,7 +1329,6 @@ wss.on('connection', (connection, req) => {
 
       const now = Date.now();
 
-      // מצב ללא barge-in: לא שומעים את הלקוח בזמן שהבוט מדבר / בזנב
       if (!MB_ALLOW_BARGE_IN) {
         if (botTurnActive || botSpeaking || now < noListenUntilTs) {
           logDebug(
@@ -1230,8 +1339,6 @@ wss.on('connection', (connection, req) => {
           return;
         }
       }
-      // מצב MB_ALLOW_BARGE_IN=true – לא מבטלים תגובה, לא שולחים response.cancel.
-      // פשוט מעבירים את האודיו למודל; הוא יזהה תור חדש לבד לפי ה-VAD.
 
       const oaMsg = {
         type: 'input_audio_buffer.append',
@@ -1242,7 +1349,7 @@ wss.on('connection', (connection, req) => {
       logInfo(tag, 'Twilio stream stopped.');
       twilioClosed = true;
       if (!callEnded) {
-        endCall('twilio_stop', MB_CLOSING_SCRIPT);
+        endCall('twilio_stop', getClosingScript());
       }
     }
   });
@@ -1251,7 +1358,7 @@ wss.on('connection', (connection, req) => {
     twilioClosed = true;
     logInfo(tag, 'Twilio WS closed.');
     if (!callEnded) {
-      endCall('twilio_ws_closed', MB_CLOSING_SCRIPT);
+      endCall('twilio_ws_closed', getClosingScript());
     }
   });
 
@@ -1259,7 +1366,7 @@ wss.on('connection', (connection, req) => {
     twilioClosed = true;
     logError(tag, 'Twilio WS error', err);
     if (!callEnded) {
-      endCall('twilio_ws_error', MB_CLOSING_SCRIPT);
+      endCall('twilio_ws_error', getClosingScript());
     }
   });
 });
@@ -1269,9 +1376,14 @@ wss.on('connection', (connection, req) => {
 // -----------------------------
 server.listen(PORT, () => {
   console.log(`✅ MisterBot Realtime Voice Bot running on port ${PORT}`);
+
+  // ✅ Settings once at startup (safe)
+  refreshRemoteSettings('Startup').catch(() => {});
+
   // ריענון KB דינאמי פעם אחת בהפעלה
   refreshDynamicBusinessPrompt('Startup').catch((err) =>
     console.error('[ERROR][DynamicKB] initial load failed', err)
   );
+
   // אין יותר setInterval – מעכשיו ריענון KB קורה רק אחרי שיחות (PostCall + Throttling)
 });
