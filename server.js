@@ -434,6 +434,19 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
+// ✅ NEW: Dashboard Deploy/Reload endpoint (NO body; updates memory only; affects new calls only)
+app.post('/dashboard/reload', async (req, res) => {
+  try {
+    // force refresh bypassing the min interval throttle
+    lastSettingsFetchAt = 0;
+    await refreshRemoteSettings('Startup'); // bypass throttle safely
+    res.status(200).json({ ok: true, reloaded: true, ts: Date.now() });
+  } catch (err) {
+    console.error('[ERROR][Dashboard] /dashboard/reload failed', err);
+    res.status(500).json({ ok: false, error: 'reload_failed' });
+  }
+});
+
 app.post('/twilio-voice', (req, res) => {
   const host = process.env.DOMAIN || req.headers.host;
   const wsUrl =
