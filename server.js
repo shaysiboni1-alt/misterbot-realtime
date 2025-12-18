@@ -226,6 +226,9 @@ const MB_NO_BARGE_TAIL_MS = envNumber('MB_NO_BARGE_TAIL_MS', 1600);
 const MB_ENABLE_LEAD_CAPTURE = envBool('MB_ENABLE_LEAD_CAPTURE', false);
 const MB_WEBHOOK_URL = process.env.MB_WEBHOOK_URL || '';
 
+// ✅ NEW: webhook נוסף ללידים (Airtable/Make) לפי הדרישה שלך
+const MB_LEADS_AIRTABLE_WEBHOOK_URL = process.env.MB_LEADS_AIRTABLE_WEBHOOK_URL || '';
+
 // PARSING חכם ללידים
 const MB_ENABLE_SMART_LEAD_PARSING = envBool('MB_ENABLE_SMART_LEAD_PARSING', true);
 const MB_LEAD_PARSING_MODEL = process.env.MB_LEAD_PARSING_MODEL || 'gpt-4.1-mini';
@@ -934,6 +937,13 @@ wss.on('connection', (connection, req) => {
       const finalPhoneNumber = parsedLead.phone_number || callerIL || callerRaw || null;
       const finalCallerId = callerE164 || callerIL || callerRaw || null;
 
+      // ✅ ensure "מספר מזוהה" fields are present (compatibility)
+      parsedLead.identified_number = finalCallerId;
+      parsedLead.identifiedNumber = finalCallerId;
+      parsedLead.identified = finalCallerId;
+      parsedLead['מספר_מזוהה'] = finalCallerId;
+      parsedLead['מספר מזוהה'] = finalCallerId;
+
       const payload = {
         streamSid,
         callSid,
@@ -948,9 +958,15 @@ wss.on('connection', (connection, req) => {
         caller_id: finalCallerId,                // snake_case
         callerId: finalCallerId,                 // camelCase
         identified_number: finalCallerId,        // explicit
+        identifiedNumber: finalCallerId,         // explicit camelCase
+        identified: finalCallerId,               // short alias
         From: callerRaw,                         // twilio-like naming
         caller_il: callerIL,                     // 05xxxxxxxx
         caller_e164: callerE164,                 // +9725xxxxxxx
+
+        // --------- Hebrew compatibility keys ----------
+        מספר_מזוהה: finalCallerId,
+        'מספר מזוהה': finalCallerId,
 
         // Lead core
         phone_number: finalPhoneNumber,
@@ -974,6 +990,7 @@ wss.on('connection', (connection, req) => {
 
       leadWebhookSent = true;
 
+      // 1) Main lead webhook
       const res = await fetch(MB_WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -984,6 +1001,27 @@ wss.on('connection', (connection, req) => {
         logError(tag, `Lead webhook HTTP ${res.status}`, await res.text());
       } else {
         logInfo(tag, `Lead webhook delivered successfully. status=${res.status}`);
+      }
+
+      // 2) Additional Airtable leads webhook (if provided)
+      if (MB_LEADS_AIRTABLE_WEBHOOK_URL) {
+        logInfo(tag, `Sending lead webhook to MB_LEADS_AIRTABLE_WEBHOOK_URL`);
+        const res2 = await fetchWithTimeout(
+          MB_LEADS_AIRTABLE_WEBHOOK_URL,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          },
+          4500
+        ).catch(() => null);
+
+        if (res2 && !res2.ok) {
+          const t2 = await res2.text().catch(() => '');
+          logError(tag, `Airtable lead webhook HTTP ${res2.status}`, t2);
+        } else {
+          logInfo(tag, `Airtable lead webhook delivered (or timeout-safe).`);
+        }
       }
     } catch (err) {
       logError(tag, 'Error sending lead webhook', err);
@@ -1150,7 +1188,8 @@ wss.on('connection', (connection, req) => {
       const ph = pendingHangup;
       pendingHangup = null;
       logInfo(tag, `Closing fallback reached (${graceMs} ms), forcing end AFTER GRACE.`);
-      endCall(ph.reason, ph.closingMessage);
+      // ✅ ensure same GRACE mechanism is used (instead of direct endCall)
+      scheduleForceEndAfterGrace(ph, 'closing_fallback');
     }, graceMs + 6000);
   }
 
