@@ -38,6 +38,17 @@ function envBool(name, def = false) {
   return ['1', 'true', 'yes', 'on'].includes(raw);
 }
 
+function sanitizeWebhookUrl(url) {
+  const u = (url || '').trim();
+  if (!u) return '';
+  // prevent placeholder-like values that accidentally were put into ENV
+  if (/^MB_[A-Z0-9_]+$/.test(u)) return '';
+  if (u === 'MB_LEADS_AIRTABLE_WEBHOOK_URL') return '';
+  if (u === 'MB_WEBHOOK_URL') return '';
+  if (!/^https?:\/\//i.test(u)) return ''; // must be http(s)
+  return u;
+}
+
 // -----------------------------
 // Core ENV config
 // -----------------------------
@@ -62,39 +73,29 @@ const MB_CLOSING_SCRIPT =
 const MB_GENERAL_PROMPT = process.env.MB_GENERAL_PROMPT || '';
 const MB_BUSINESS_PROMPT = process.env.MB_BUSINESS_PROMPT || '';
 
-// אפשר להשאיר את זה לשימוש עתידי / לוגים, אבל הוא כבר לא מכתיב טקסט בקוד
 const MB_LANGUAGES = (process.env.MB_LANGUAGES || 'he,en,ru,ar')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
 
-const MB_SPEECH_SPEED = envNumber('MB_SPEECH_SPEED', 1.15);
-
+const MB_SPEECH_SPEED = envNumber('MB_SPEECH_SPEED', 1.15); // (OpenAI Realtime voice currently ignores "speed" but kept for future)
 const OPENAI_VOICE = process.env.OPENAI_VOICE || 'alloy';
 
 // -----------------------------
-// ✅ Dashboard / Make webhooks (NEW – safe layer)
+// ✅ Dashboard / Make webhooks (safe layer)
 // -----------------------------
-const MB_SETTINGS_API_URL = process.env.MB_SETTINGS_API_URL || ''; // Scenario: neta_settings_api (optional)
-const MB_CALL_LOG_WEBHOOK_URL = process.env.MB_CALL_LOG_WEBHOOK_URL || ''; // Scenario: neta_call_log (required for Airtable logs)
-const MB_CALL_LOG_ENABLED = envBool(
-  'MB_CALL_LOG_ENABLED',
-  !!MB_CALL_LOG_WEBHOOK_URL
-);
-const MB_SETTINGS_MIN_INTERVAL_MS = envNumber(
-  'MB_SETTINGS_MIN_INTERVAL_MS',
-  60 * 1000
-);
+const MB_SETTINGS_API_URL = sanitizeWebhookUrl(process.env.MB_SETTINGS_API_URL || '');
+const MB_CALL_LOG_WEBHOOK_URL = sanitizeWebhookUrl(process.env.MB_CALL_LOG_WEBHOOK_URL || '');
+const MB_CALL_LOG_ENABLED = envBool('MB_CALL_LOG_ENABLED', !!MB_CALL_LOG_WEBHOOK_URL);
+const MB_SETTINGS_MIN_INTERVAL_MS = envNumber('MB_SETTINGS_MIN_INTERVAL_MS', 60 * 1000);
 
-// cache for remote settings (does NOT break if empty)
+// cache for remote settings
 let remoteSettings = {
   bot_name: BOT_NAME,
   opening_script: null,
   closing_script: null,
   master_prompt: null,
   business_prompt: null,
-  // You can optionally pass other fields from Airtable like:
-  // openai_voice, speech_speed, business_kb_url ...
   openai_voice: null,
   speech_speed: null
 };
@@ -142,7 +143,6 @@ async function refreshRemoteSettings(tag = 'Settings') {
       return;
     }
 
-    // Accept both flattened or { settings: {...} } responses
     const s = data.settings && typeof data.settings === 'object' ? data.settings : data;
 
     remoteSettings = {
@@ -178,7 +178,9 @@ function getEffectiveSpeechSpeed() {
   return MB_SPEECH_SPEED;
 }
 
-// ניהול נכון של MAX_OUTPUT_TOKENS – תמיד מספר או "inf"
+// -----------------------------
+// MAX_OUTPUT_TOKENS – always number or "inf"
+// -----------------------------
 const MAX_OUTPUT_TOKENS_ENV = process.env.MAX_OUTPUT_TOKENS;
 let MAX_OUTPUT_TOKENS = 'inf';
 if (MAX_OUTPUT_TOKENS_ENV) {
@@ -190,7 +192,9 @@ if (MAX_OUTPUT_TOKENS_ENV) {
   }
 }
 
-// Helper – נורמליזציה לטקסט לצורך זיהוי משפט סגירה
+// -----------------------------
+// Normalize for closing phrase detection
+// -----------------------------
 function normalizeForClosing(text) {
   return (text || '')
     .toLowerCase()
@@ -200,43 +204,40 @@ function normalizeForClosing(text) {
     .trim();
 }
 
-// VAD – ברירות מחדל מחוזקות לרעשי רקע
+// -----------------------------
+// VAD defaults (noise hardened)
+// -----------------------------
 const MB_VAD_THRESHOLD = envNumber('MB_VAD_THRESHOLD', 0.65);
 const MB_VAD_SILENCE_MS = envNumber('MB_VAD_SILENCE_MS', 900);
 const MB_VAD_PREFIX_MS = envNumber('MB_VAD_PREFIX_MS', 200);
-const MB_VAD_SUFFIX_MS = envNumber('MB_VAD_SUFFIX_MS', 200); // קטע שקט נוסף אחרי הזיהוי
+const MB_VAD_SUFFIX_MS = envNumber('MB_VAD_SUFFIX_MS', 200);
 
 // Idle / Duration
-const MB_IDLE_WARNING_MS = envNumber('MB_IDLE_WARNING_MS', 40000); // 40 שניות
-const MB_IDLE_HANGUP_MS = envNumber('MB_IDLE_HANGUP_MS', 90000);  // 90 שניות
+const MB_IDLE_WARNING_MS = envNumber('MB_IDLE_WARNING_MS', 40000);
+const MB_IDLE_HANGUP_MS = envNumber('MB_IDLE_HANGUP_MS', 90000);
 
-// מגבלת זמן שיחה – ברירת מחדל 5 דקות
+// Max call
 const MB_MAX_CALL_MS = envNumber('MB_MAX_CALL_MS', 5 * 60 * 1000);
-const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000); // 45 שניות לפני הסוף
-// כמה זמן אחרי הסגיר לנתק בכוח
+const MB_MAX_WARN_BEFORE_MS = envNumber('MB_MAX_WARN_BEFORE_MS', 45000);
 const MB_HANGUP_GRACE_MS = envNumber('MB_HANGUP_GRACE_MS', 5000);
 
-// האם מותר ללקוח לקטוע את הבוט (barge-in)
+// Barge-in
 const MB_ALLOW_BARGE_IN = envBool('MB_ALLOW_BARGE_IN', false);
-
-// Tail שבו עדיין לא מקשיבים אחרי שהבוט סיים לדבר (מילישניות)
 const MB_NO_BARGE_TAIL_MS = envNumber('MB_NO_BARGE_TAIL_MS', 1600);
 
-// לידים / וובהוק
+// Leads / webhooks
 const MB_ENABLE_LEAD_CAPTURE = envBool('MB_ENABLE_LEAD_CAPTURE', false);
-const MB_WEBHOOK_URL = process.env.MB_WEBHOOK_URL || '';
+const MB_WEBHOOK_URL = sanitizeWebhookUrl(process.env.MB_WEBHOOK_URL || '');
+const MB_LEADS_AIRTABLE_WEBHOOK_URL = sanitizeWebhookUrl(process.env.MB_LEADS_AIRTABLE_WEBHOOK_URL || '');
 
-// ✅ NEW: webhook נוסף ללידים (Airtable/Make) לפי הדרישה שלך
-const MB_LEADS_AIRTABLE_WEBHOOK_URL = process.env.MB_LEADS_AIRTABLE_WEBHOOK_URL || '';
-
-// PARSING חכם ללידים
+// Smart parsing
 const MB_ENABLE_SMART_LEAD_PARSING = envBool('MB_ENABLE_SMART_LEAD_PARSING', true);
 const MB_LEAD_PARSING_MODEL = process.env.MB_LEAD_PARSING_MODEL || 'gpt-4.1-mini';
 
 // Debug
 const MB_DEBUG = envBool('MB_DEBUG', false);
 
-// Twilio credentials לניתוק אקטיבי + שליפת פרטי שיחה
+// Twilio credentials
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || '';
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
 
@@ -252,13 +253,8 @@ console.log(
 // -----------------------------
 const MB_DYNAMIC_KB_URL = process.env.MB_DYNAMIC_KB_URL || '';
 let dynamicBusinessPrompt = '';
-
-// זמן מינימלי בין ריענונים (ל-Throttling אחרי שיחות)
 let lastDynamicKbRefreshAt = 0;
-const MB_DYNAMIC_KB_MIN_INTERVAL_MS = envNumber(
-  'MB_DYNAMIC_KB_MIN_INTERVAL_MS',
-  5 * 60 * 1000 // ברירת מחדל: לא יותר מפעם ב-5 דקות
-);
+const MB_DYNAMIC_KB_MIN_INTERVAL_MS = envNumber('MB_DYNAMIC_KB_MIN_INTERVAL_MS', 5 * 60 * 1000);
 
 async function refreshDynamicBusinessPrompt(tag = 'DynamicKB') {
   if (!MB_DYNAMIC_KB_URL) {
@@ -292,35 +288,24 @@ async function refreshDynamicBusinessPrompt(tag = 'DynamicKB') {
 }
 
 // -----------------------------
-// Helpers – logging
+// Logging helpers
 // -----------------------------
 function logDebug(tag, msg, extra) {
   if (!MB_DEBUG) return;
-  if (extra !== undefined) {
-    console.log(`[DEBUG][${tag}] ${msg}`, extra);
-  } else {
-    console.log(`[DEBUG][${tag}] ${msg}`);
-  }
+  if (extra !== undefined) console.log(`[DEBUG][${tag}] ${msg}`, extra);
+  else console.log(`[DEBUG][${tag}] ${msg}`);
 }
-
 function logInfo(tag, msg, extra) {
-  if (extra !== undefined) {
-    console.log(`[INFO][${tag}] ${msg}`, extra);
-  } else {
-    console.log(`[INFO][${tag}] ${msg}`);
-  }
+  if (extra !== undefined) console.log(`[INFO][${tag}] ${msg}`, extra);
+  else console.log(`[INFO][${tag}] ${msg}`);
 }
-
 function logError(tag, msg, extra) {
-  if (extra !== undefined) {
-    console.error(`[ERROR][${tag}] ${msg}`, extra);
-  } else {
-    console.error(`[ERROR][${tag}] ${msg}`);
-  }
+  if (extra !== undefined) console.error(`[ERROR][${tag}] ${msg}`, extra);
+  else console.error(`[ERROR][${tag}] ${msg}`);
 }
 
 // -----------------------------
-// Helper – נורמליזציה למספר טלפון ישראלי
+// Phone normalization (IL)
 // -----------------------------
 function normalizePhoneNumber(rawPhone, callerNumber) {
   function toDigits(num) {
@@ -365,7 +350,6 @@ function normalizePhoneNumber(rawPhone, callerNumber) {
   return null;
 }
 
-// ✅ helpers for caller-id compatibility (raw + IL + E164)
 function digitsOnly(v) {
   if (!v) return null;
   const d = String(v).replace(/\D/g, '');
@@ -388,6 +372,45 @@ function toE164FromIsraeliLocal(local) {
   return null;
 }
 
+function formatIsraeliPhoneForTts(ilLocalDigits) {
+  // expects 0XXXXXXXXX or 0XXXXXXXXXX
+  const d = digitsOnly(ilLocalDigits);
+  if (!d || !d.startsWith('0')) return ilLocalDigits;
+  // common mobile: 05X-XXX-XXXX
+  if (d.length === 10 && d.startsWith('05')) {
+    return `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}`;
+  }
+  // landline: 0X-XXX-XXXX (9 digits) / 0XX-XXX-XXXX (10 digits)
+  if (d.length === 9) {
+    return `${d.slice(0, 2)}-${d.slice(2, 5)}-${d.slice(5)}`;
+  }
+  if (d.length === 10 && !d.startsWith('05')) {
+    return `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}`;
+  }
+  return d;
+}
+
+function detectPhoneCandidateFromText(text) {
+  const t = String(text || '');
+  // Accept patterns like: 050-970-3561, 0509703561, +972509703561, 972509703561
+  const digits = t.replace(/\D/g, '');
+  if (!digits) return null;
+
+  // Prefer the longest plausible sequence inside the utterance
+  // but keep it simple: normalizePhoneNumber already validates.
+  const normalized = normalizePhoneNumber(digits, null);
+  return normalized; // returns IL local digits like 0509703561 or null
+}
+
+function isYes(text) {
+  const t = (text || '').trim().toLowerCase();
+  return /^(כן|נכון|בדיוק|אכן|כן נכון|נכון מאוד|כן זה נכון)\b/.test(t);
+}
+function isNo(text) {
+  const t = (text || '').trim().toLowerCase();
+  return /^(לא|ממש לא|לא נכון|טעות|זה לא|לא זה)\b/.test(t);
+}
+
 // -----------------------------
 // System instructions builder
 // -----------------------------
@@ -398,6 +421,7 @@ const EXTRA_BEHAVIOR_RULES = `
 3. כאשר את מתבקשת לסיים שיחה, אמרי את משפט הסיום המדויק שהוגדר במערכת בלבד, בלי להוסיף ובלי לשנות.
 4. שמרי על תשובות קצרות, ברורות וממוקדות (בדרך-כלל עד 2–3 משפטים), אלא אם הלקוח ביקש הסבר מפורט.
 5. כאשר השיחה מגיעה באופן טבעי לסיום (הכול ברור, אין עוד שאלות, סיכמתם פעולה וכדומה) – אל תסיימי מיד. קודם שאלי שאלה קצרה בסגנון: "לפני שאני מסיימת, יש עוד משהו שתרצו או שהכול ברור?". אם הלקוח עונה בצורה שלילית (למשל: "לא", "זהו", "זה הכול", "הכול בסדר", "הכול ברור" וכדומה) – זה נחשב רשות לסיים את השיחה, ומיד לאחר מכן אמרי רק את משפט הסיום המדויק מהמערכת, בלי להוסיף מידע חדש. אם הלקוח כן רוצה להמשיך – תעני כרגיל ואל תאמרי את משפט הסיום עדיין.
+6. מספרי טלפון: אם הלקוח מסר מספר טלפון, חזרי עליו בדיוק כפי שנמסר, ובקשי אישור קצר: "זה נכון?". אל תשני ספרות ואל "תנחשי" מספר.
 `.trim();
 
 function buildSystemInstructions() {
@@ -405,7 +429,6 @@ function buildSystemInstructions() {
   const staticKb = (MB_BUSINESS_PROMPT || '').trim();
   const dynamicKb = (dynamicBusinessPrompt || '').trim();
 
-  // ✅ Remote settings prompts (optional, SAFE)
   const remoteMaster = (remoteSettings.master_prompt || '').trim();
   const remoteBiz = (remoteSettings.business_prompt || '').trim();
 
@@ -437,12 +460,11 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// ✅ NEW: Dashboard Deploy/Reload endpoint (NO body; updates memory only; affects new calls only)
+// Dashboard reload
 app.post('/dashboard/reload', async (req, res) => {
   try {
-    // force refresh bypassing the min interval throttle
     lastSettingsFetchAt = 0;
-    await refreshRemoteSettings('Startup'); // bypass throttle safely
+    await refreshRemoteSettings('Startup');
     res.status(200).json({ ok: true, reloaded: true, ts: Date.now() });
   } catch (err) {
     console.error('[ERROR][Dashboard] /dashboard/reload failed', err);
@@ -454,9 +476,12 @@ app.post('/twilio-voice', (req, res) => {
   const host = process.env.DOMAIN || req.headers.host;
   const wsUrl =
     process.env.MB_TWILIO_STREAM_URL ||
-    `wss://${host.replace(/^https?:\/\//, '')}/twilio-media-stream`;
+    `wss://${String(host || '').replace(/^https?:\/\//, '')}/twilio-media-stream`;
 
+  // Twilio sends From/To in form-urlencoded
   const caller = req.body.From || '';
+  const called = req.body.To || '';
+  const direction = req.body.Direction || 'inbound';
 
   const twiml = `
 <?xml version="1.0" encoding="UTF-8"?>
@@ -464,14 +489,13 @@ app.post('/twilio-voice', (req, res) => {
   <Connect>
     <Stream url="${wsUrl}">
       <Parameter name="caller" value="${caller}"/>
+      <Parameter name="called" value="${called}"/>
+      <Parameter name="direction" value="${direction}"/>
     </Stream>
   </Connect>
 </Response>`.trim();
 
-  logInfo(
-    'Twilio-Voice',
-    `Returning TwiML with Stream URL: ${wsUrl}, From=${caller}`
-  );
+  logInfo('Twilio-Voice', `Returning TwiML with Stream URL: ${wsUrl}, From=${caller}, To=${called}`);
   res.type('text/xml').send(twiml);
 });
 
@@ -582,7 +606,7 @@ ${conversationText}
 }
 
 // -----------------------------
-// Helper – ניתוק אקטיבי בטוויליו
+// Helper – Twilio hangup
 // -----------------------------
 async function hangupTwilioCall(callSid, tag = 'Call') {
   if (!callSid) {
@@ -590,10 +614,7 @@ async function hangupTwilioCall(callSid, tag = 'Call') {
     return;
   }
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
-    logDebug(
-      tag,
-      'TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN missing – cannot hang up via Twilio API.'
-    );
+    logDebug(tag, 'TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN missing – cannot hang up via Twilio API.');
     return;
   }
 
@@ -605,8 +626,7 @@ async function hangupTwilioCall(callSid, tag = 'Call') {
       method: 'POST',
       headers: {
         Authorization:
-          'Basic ' +
-          Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64'),
+          'Basic ' + Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64'),
         'Content-Type': 'application/x-www-form-urlencoded'
       },
       body
@@ -624,7 +644,7 @@ async function hangupTwilioCall(callSid, tag = 'Call') {
 }
 
 // -----------------------------
-// Helper – שליפה אקטיבית של המספר המזוהה מטוויליו לפי callSid
+// Helper – fetch caller number from Twilio
 // -----------------------------
 async function fetchCallerNumberFromTwilio(callSid, tag = 'Call') {
   if (!callSid) {
@@ -632,10 +652,7 @@ async function fetchCallerNumberFromTwilio(callSid, tag = 'Call') {
     return null;
   }
   if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
-    logDebug(
-      tag,
-      'fetchCallerNumberFromTwilio: missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN.'
-    );
+    logDebug(tag, 'fetchCallerNumberFromTwilio: missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN.');
     return null;
   }
 
@@ -645,8 +662,7 @@ async function fetchCallerNumberFromTwilio(callSid, tag = 'Call') {
       method: 'GET',
       headers: {
         Authorization:
-          'Basic ' +
-          Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64')
+          'Basic ' + Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64')
       }
     });
 
@@ -657,12 +673,9 @@ async function fetchCallerNumberFromTwilio(callSid, tag = 'Call') {
     }
 
     const data = await res.json();
-    const fromRaw = data.from || data.caller_name || null;
+    const fromRaw = data.from || null;
 
-    logInfo(
-      tag,
-      `fetchCallerNumberFromTwilio: resolved caller="${fromRaw}" from Twilio Call resource.`
-    );
+    logInfo(tag, `fetchCallerNumberFromTwilio: resolved caller="${fromRaw}" from Twilio Call resource.`);
     return fromRaw;
   } catch (err) {
     logError(tag, 'fetchCallerNumberFromTwilio: error fetching from Twilio', err);
@@ -683,12 +696,20 @@ wss.on('connection', (connection, req) => {
     return;
   }
 
-  // ✅ refresh settings in background (safe, non-blocking)
   refreshRemoteSettings('OnConnect').catch(() => {});
 
   let streamSid = null;
   let callSid = null;
-  let callerNumber = null;
+  let callerNumber = null; // raw
+  let calledNumber = null;
+  let callDirection = null;
+
+  // ✅ anti-hallucination: deterministic slot capture
+  let awaitingPhone = false;
+  let awaitingPhoneConfirm = false;
+  let collectedPhoneIL = null; // 0XXXXXXXXX/0XXXXXXXXXX
+  let awaitingName = false;
+  let collectedName = null;
 
   const instructions = buildSystemInstructions();
 
@@ -702,7 +723,7 @@ wss.on('connection', (connection, req) => {
     }
   );
 
-  let conversationLog = []; // [{ from: 'user'|'bot', text }]
+  let conversationLog = [];
   let currentBotText = '';
   let callStartTs = Date.now();
   let lastMediaTs = Date.now();
@@ -711,7 +732,7 @@ wss.on('connection', (connection, req) => {
   let idleHangupScheduled = false;
   let maxCallTimeout = null;
   let maxCallWarningTimeout = null;
-  let pendingHangup = null; // { reason, closingMessage }
+  let pendingHangup = null;
   let openAiReady = false;
   let twilioClosed = false;
   let openAiClosed = false;
@@ -721,25 +742,18 @@ wss.on('connection', (connection, req) => {
   let hasActiveResponse = false;
   let botTurnActive = false;
   let noListenUntilTs = 0;
-  let userHasSpoken = false;
 
   let leadWebhookSent = false;
 
-  // ✅ grace helper (single source)
   function getGraceMs() {
-    const rawGrace =
-      MB_HANGUP_GRACE_MS && MB_HANGUP_GRACE_MS > 0 ? MB_HANGUP_GRACE_MS : 3000;
+    const rawGrace = MB_HANGUP_GRACE_MS && MB_HANGUP_GRACE_MS > 0 ? MB_HANGUP_GRACE_MS : 3000;
     return Math.max(2000, Math.min(rawGrace, 8000));
   }
 
-  // ✅ Always hangup AFTER GRACE once closing is finished
   let graceHangupTimer = null;
   function scheduleForceEndAfterGrace(ph, why = 'closing_done') {
     if (!ph || callEnded) return;
-    if (graceHangupTimer) {
-      logDebug(tag, 'Grace hangup timer already scheduled, skipping duplicate.');
-      return;
-    }
+    if (graceHangupTimer) return;
 
     const graceMs = getGraceMs();
     logInfo(tag, `Scheduling endCall AFTER GRACE (${graceMs} ms). why=${why}`);
@@ -751,19 +765,24 @@ wss.on('connection', (connection, req) => {
     }, graceMs);
   }
 
-  // -----------------------------
-  // Helper: שליחת טקסט למודל עם הגנה על response כפול
-  // -----------------------------
+  function safeCancelResponseIfNeeded() {
+    if (!openAiReady || openAiWs.readyState !== WebSocket.OPEN) return;
+    if (!hasActiveResponse) return;
+    try {
+      openAiWs.send(JSON.stringify({ type: 'response.cancel' }));
+    } catch (_) {}
+    hasActiveResponse = false;
+    botSpeaking = false;
+    botTurnActive = false;
+  }
+
   function sendModelPrompt(text, purpose) {
     if (openAiWs.readyState !== WebSocket.OPEN) {
       logDebug(tag, `Cannot send model prompt (${purpose || 'no-tag'}) – WS not open.`);
       return;
     }
     if (hasActiveResponse) {
-      logDebug(
-        tag,
-        `Skipping model prompt (${purpose || 'no-tag'}) – conversation already has active response.`
-      );
+      logDebug(tag, `Skipping model prompt (${purpose || 'no-tag'}) – active response exists.`);
       return;
     }
 
@@ -784,14 +803,9 @@ wss.on('connection', (connection, req) => {
 
   function conversationMentionsCallerId() {
     const patterns = [/מזוהה/, /למספר שממנו/, /למספר שממנו אני מתקשר/, /למספר שממנו התקשרתי/];
-    return conversationLog.some(
-      (m) => m.from === 'user' && patterns.some((re) => re.test(m.text || ''))
-    );
+    return conversationLog.some((m) => m.from === 'user' && patterns.some((re) => re.test(m.text || '')));
   }
 
-  // -----------------------------
-  // ✅ Dashboard helper: Send Call Log webhook (NEW)
-  // -----------------------------
   function mapCallStatus(reason) {
     const r = String(reason || '').toLowerCase();
     if (r.includes('error')) return 'error';
@@ -812,17 +826,21 @@ wss.on('connection', (connection, req) => {
         .map((m) => `${m.from === 'user' ? 'לקוח' : BOT_NAME}: ${m.text}`)
         .join('\n');
 
-      const collectedPhone = normalizePhoneNumber(parsedLead?.phone_number, callerNumber);
+      const collectedPhone = normalizePhoneNumber(parsedLead?.phone_number, callerNumber) || collectedPhoneIL;
 
       const payload = {
         call_id: callSid || streamSid || `call_${Date.now()}`,
-        call_direction: 'inbound',
+        call_direction: callDirection || 'inbound',
         started_at: startedAt,
         ended_at: endedAt,
         duration_sec: durationSec,
         caller_id: callerNumber || null,
-        collected_phone: collectedPhone ? (collectedPhone.startsWith('0') ? `+972${collectedPhone.slice(1)}` : collectedPhone) : (callerNumber || null),
-        contact_name: parsedLead?.full_name || null,
+        collected_phone: collectedPhone
+          ? collectedPhone.startsWith('0')
+            ? `+972${collectedPhone.slice(1)}`
+            : collectedPhone
+          : callerNumber || null,
+        contact_name: parsedLead?.full_name || collectedName || null,
         call_status: mapCallStatus(reason),
         last_user_utterance: lastUser || null,
         transcript,
@@ -849,78 +867,61 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: שליחת וובהוק לידים – פעם אחת בלבד, ורק אם זה ליד מלא
+  // ✅ Lead webhook – now accepts parsedLead to avoid double parsing
   // -----------------------------
-  async function sendLeadWebhook(reason, closingMessage) {
+  async function sendLeadWebhook(reason, closingMessage, parsedLeadFromEndCall) {
     if (!MB_ENABLE_LEAD_CAPTURE || !MB_WEBHOOK_URL) {
       logDebug(tag, 'Lead capture disabled or no MB_WEBHOOK_URL – skipping webhook.');
       return;
     }
-
     if (leadWebhookSent) {
       logDebug(tag, 'Lead webhook already sent for this call – skipping.');
       return;
     }
 
     try {
-      // ✅ ensure we have callerNumber (raw) if possible
+      // Ensure we have callerNumber if possible
       if (!callerNumber && callSid) {
         const resolved = await fetchCallerNumberFromTwilio(callSid, tag);
-        if (resolved) {
-          callerNumber = resolved;
-        }
+        if (resolved) callerNumber = resolved;
       }
 
-      let parsedLead = await extractLeadFromConversation(conversationLog);
+      // Use parsed lead from endCall (preferred). If missing, parse once here.
+      let parsedLead = parsedLeadFromEndCall;
+      if (!parsedLead || typeof parsedLead !== 'object') {
+        parsedLead = await extractLeadFromConversation(conversationLog);
+      }
 
       if (!parsedLead || typeof parsedLead !== 'object') {
         logInfo(tag, 'No parsed lead object – skipping webhook (לא ליד מלא).');
         return;
       }
 
-      // ✅ Caller-id formats (always available to payload)
       const callerRaw = callerNumber ? String(callerNumber) : null;
-      const callerIL = toIsraeliLocalFromAny(callerRaw) || null; // e.g. 05xxxxxxxx
+      const callerIL = toIsraeliLocalFromAny(callerRaw) || null;
       const callerE164 = toE164FromIsraeliLocal(callerIL) || (callerRaw && callerRaw.startsWith('+') ? callerRaw : null);
 
-      // If lead has no phone, fallback to caller-id
-      if (!parsedLead.phone_number && callerRaw) {
-        parsedLead.phone_number = callerRaw;
+      // Deterministic collected phone
+      const normalizedPhone = normalizePhoneNumber(parsedLead.phone_number, callerRaw) || collectedPhoneIL || null;
+      parsedLead.phone_number = normalizedPhone;
 
+      if (!parsedLead.phone_number && callerRaw) {
+        parsedLead.phone_number = normalizePhoneNumber(callerRaw, callerRaw) || null;
         const suffixNote = conversationMentionsCallerId()
           ? 'הלקוח ביקש חזרה למספר המזוהה ממנו התקשר.'
           : 'לא נמסר מספר טלפון מפורש בשיחה – נעשה שימוש במספר המזוהה מהמערכת.';
-
-        parsedLead.notes =
-          (parsedLead.notes || '') +
-          (parsedLead.notes ? ' ' : '') +
-          suffixNote;
+        parsedLead.notes = (parsedLead.notes || '') + (parsedLead.notes ? ' ' : '') + suffixNote;
       }
 
-      // normalize lead phone (IL local digits) using either lead or caller
-      const normalizedPhone = normalizePhoneNumber(
-        parsedLead.phone_number,
-        callerRaw
-      );
-      parsedLead.phone_number = normalizedPhone;
-
-      // Keep compatibility fields inside parsedLead too
       parsedLead.caller_id_raw = callerRaw;
       parsedLead.caller_id_il = callerIL;
       parsedLead.caller_id_e164 = callerE164;
 
-      if (
-        !parsedLead.business_name ||
-        typeof parsedLead.business_name !== 'string' ||
-        !parsedLead.business_name.trim()
-      ) {
+      if (!parsedLead.business_name || typeof parsedLead.business_name !== 'string' || !parsedLead.business_name.trim()) {
         parsedLead.business_name = 'לא רלוונטי';
       }
 
-      const isFullLead =
-        parsedLead.is_lead === true &&
-        !!parsedLead.phone_number;
-
+      const isFullLead = parsedLead.is_lead === true && !!parsedLead.phone_number;
       if (!isFullLead) {
         logInfo(tag, 'Parsed lead is NOT full lead – webhook will NOT be sent.', {
           is_lead: parsedLead.is_lead,
@@ -930,14 +931,9 @@ wss.on('connection', (connection, req) => {
         return;
       }
 
-      // ✅ What email scenario usually expects:
-      // - phone_number = collected/normalized
-      // - caller_id / callerId = identified number
-      // - also keep old fields (callerNumber, CALLERID) for backward compatibility
       const finalPhoneNumber = parsedLead.phone_number || callerIL || callerRaw || null;
       const finalCallerId = callerE164 || callerIL || callerRaw || null;
 
-      // ✅ ensure "מספר מזוהה" fields are present (compatibility)
       parsedLead.identified_number = finalCallerId;
       parsedLead.identifiedNumber = finalCallerId;
       parsedLead.identified = finalCallerId;
@@ -948,27 +944,23 @@ wss.on('connection', (connection, req) => {
         streamSid,
         callSid,
 
-        // --------- Backward compatible fields ----------
-        callerNumber: callerRaw,                 // existed before (raw)
-        CALLERID: finalCallerId,                 // existed before
+        callerNumber: callerRaw,
+        CALLERID: finalCallerId,
         callerIdRaw: callerRaw,
         callerIdNormalized: callerIL,
 
-        // --------- NEW compatibility fields (for Make/email) ----------
-        caller_id: finalCallerId,                // snake_case
-        callerId: finalCallerId,                 // camelCase
-        identified_number: finalCallerId,        // explicit
-        identifiedNumber: finalCallerId,         // explicit camelCase
-        identified: finalCallerId,               // short alias
-        From: callerRaw,                         // twilio-like naming
-        caller_il: callerIL,                     // 05xxxxxxxx
-        caller_e164: callerE164,                 // +9725xxxxxxx
+        caller_id: finalCallerId,
+        callerId: finalCallerId,
+        identified_number: finalCallerId,
+        identifiedNumber: finalCallerId,
+        identified: finalCallerId,
+        From: callerRaw,
+        caller_il: callerIL,
+        caller_e164: callerE164,
 
-        // --------- Hebrew compatibility keys ----------
         מספר_מזוהה: finalCallerId,
         'מספר מזוהה': finalCallerId,
 
-        // Lead core
         phone_number: finalPhoneNumber,
         botName: BOT_NAME,
         businessName: BUSINESS_NAME,
@@ -983,14 +975,10 @@ wss.on('connection', (connection, req) => {
       };
 
       logInfo(tag, `Sending lead webhook to ${MB_WEBHOOK_URL}`);
-      logInfo(tag, 'Lead webhook short summary', {
-        phone_number: finalPhoneNumber,
-        caller_id: finalCallerId
-      });
+      logInfo(tag, 'Lead webhook short summary', { phone_number: finalPhoneNumber, caller_id: finalCallerId });
 
       leadWebhookSent = true;
 
-      // 1) Main lead webhook
       const res = await fetch(MB_WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1003,7 +991,6 @@ wss.on('connection', (connection, req) => {
         logInfo(tag, `Lead webhook delivered successfully. status=${res.status}`);
       }
 
-      // 2) Additional Airtable leads webhook (if provided)
       if (MB_LEADS_AIRTABLE_WEBHOOK_URL) {
         logInfo(tag, `Sending lead webhook to MB_LEADS_AIRTABLE_WEBHOOK_URL`);
         const res2 = await fetchWithTimeout(
@@ -1029,7 +1016,7 @@ wss.on('connection', (connection, req) => {
   }
 
   // -----------------------------
-  // Helper: סיום שיחה מרוכז – ניתוק אחרי סגיר
+  // End call (non-blocking)
   // -----------------------------
   async function endCall(reason, closingMessage) {
     if (callEnded) {
@@ -1052,9 +1039,7 @@ wss.on('connection', (connection, req) => {
 
     const effectiveClosing = closingMessage || getClosingScript();
 
-    // ✅ CRITICAL FIX:
-    // Hangup must NOT wait for parsing/webhooks. We disconnect immediately here.
-    // Everything else runs fire-and-forget afterward.
+    // Snapshot
     const callSidSnapshot = callSid;
     const streamSidSnapshot = streamSid;
     const callerSnapshot = callerNumber;
@@ -1062,86 +1047,66 @@ wss.on('connection', (connection, req) => {
     const convoSnapshot = Array.isArray(conversationLog) ? [...conversationLog] : [];
     const reasonSnapshot = reason;
     const closingSnapshot = effectiveClosing;
+    const collectedPhoneSnapshot = collectedPhoneIL;
+    const collectedNameSnapshot = collectedName;
 
-    // 1) request Twilio hangup ASAP
-    if (callSidSnapshot) {
-      hangupTwilioCall(callSidSnapshot, tag).catch(() => {});
-    }
+    // Hangup ASAP
+    if (callSidSnapshot) hangupTwilioCall(callSidSnapshot, tag).catch(() => {});
 
-    // 2) close OpenAI + Twilio sockets ASAP
+    // Close sockets ASAP
     if (!openAiClosed && openAiWs.readyState === WebSocket.OPEN) {
       openAiClosed = true;
       openAiWs.close();
     }
-
     if (!twilioClosed && connection.readyState === WebSocket.OPEN) {
       twilioClosed = true;
       connection.close();
     }
 
-    botSpeaking = false;
-    hasActiveResponse = false;
-    botTurnActive = false;
-    noListenUntilTs = 0;
-
-    // 3) fire-and-forget post-call tasks (do NOT block hangup)
+    // Fire-and-forget post-call tasks
     (async () => {
       try {
-        // lead parsing once here (for call log + optional lead webhook)
         let parsedLeadForLog = null;
+
         try {
           parsedLeadForLog = await extractLeadFromConversation(convoSnapshot);
           if (parsedLeadForLog && typeof parsedLeadForLog === 'object') {
+            // merge deterministic captures
+            if (!parsedLeadForLog.phone_number && collectedPhoneSnapshot) parsedLeadForLog.phone_number = collectedPhoneSnapshot;
+            if (!parsedLeadForLog.full_name && collectedNameSnapshot) parsedLeadForLog.full_name = collectedNameSnapshot;
+
             const normalized = normalizePhoneNumber(parsedLeadForLog.phone_number, callerSnapshot);
             parsedLeadForLog.phone_number = normalized || parsedLeadForLog.phone_number || null;
           }
-        } catch (e) {}
+        } catch (_) {}
 
-        // Call Log webhook
+        // Temporarily swap context for webhooks
+        const prev = { callStartTs, conversationLog, callerNumber, callSid, streamSid };
+        callStartTs = callStartSnapshot;
+        conversationLog = convoSnapshot;
+        callerNumber = callerSnapshot;
+        callSid = callSidSnapshot;
+        streamSid = streamSidSnapshot;
+
         if (MB_CALL_LOG_ENABLED && MB_CALL_LOG_WEBHOOK_URL) {
-          // temporarily swap snapshot context
-          const prev = { callStartTs, conversationLog, callerNumber, callSid, streamSid };
-          callStartTs = callStartSnapshot;
-          conversationLog = convoSnapshot;
-          callerNumber = callerSnapshot;
-          callSid = callSidSnapshot;
-          streamSid = streamSidSnapshot;
-
           await sendCallLogWebhook({
             reason: reasonSnapshot,
             closingMessage: closingSnapshot,
             parsedLead: parsedLeadForLog
           }).catch(() => {});
-
-          // restore
-          callStartTs = prev.callStartTs;
-          conversationLog = prev.conversationLog;
-          callerNumber = prev.callerNumber;
-          callSid = prev.callSid;
-          streamSid = prev.streamSid;
         }
 
-        // Lead webhook (if enabled)
         if (MB_ENABLE_LEAD_CAPTURE && MB_WEBHOOK_URL) {
-          // temporarily swap snapshot context (so sendLeadWebhook uses same data)
-          const prev = { callStartTs, conversationLog, callerNumber, callSid, streamSid };
-          callStartTs = callStartSnapshot;
-          conversationLog = convoSnapshot;
-          callerNumber = callerSnapshot;
-          callSid = callSidSnapshot;
-          streamSid = streamSidSnapshot;
-
-          await sendLeadWebhook(reasonSnapshot, closingSnapshot).catch(() => {});
-
-          // restore
-          callStartTs = prev.callStartTs;
-          conversationLog = prev.conversationLog;
-          callerNumber = prev.callerNumber;
-          callSid = prev.callSid;
-          streamSid = prev.streamSid;
+          await sendLeadWebhook(reasonSnapshot, closingSnapshot, parsedLeadForLog).catch(() => {});
         }
 
-        // Dynamic KB refresh after call
+        // Restore
+        callStartTs = prev.callStartTs;
+        conversationLog = prev.conversationLog;
+        callerNumber = prev.callerNumber;
+        callSid = prev.callSid;
+        streamSid = prev.streamSid;
+
         if (MB_DYNAMIC_KB_URL) {
           refreshDynamicBusinessPrompt('PostCall').catch((err) =>
             logError(tag, 'DynamicKB post-call refresh failed', err)
@@ -1158,29 +1123,21 @@ wss.on('connection', (connection, req) => {
 
     const msg = closingMessage || getClosingScript();
 
-    if (pendingHangup) {
-      logDebug(tag, 'Hangup already scheduled, skipping duplicate.');
-      return;
-    }
+    if (pendingHangup) return;
 
     logInfo(tag, `scheduleEndCall invoked. reason="${reason}", closingMessage="${msg}"`);
     pendingHangup = { reason, closingMessage: msg };
 
     if (openAiWs.readyState === WebSocket.OPEN) {
-      sendModelPrompt(
-        `סיימי את השיחה עם הלקוח במשפט הבא בלבד, בלי להוסיף שום משפט נוסף: "${msg}"`,
-        'closing'
-      );
+      sendModelPrompt(`סיימי את השיחה עם הלקוח במשפט הבא בלבד, בלי להוסיף שום משפט נוסף: "${msg}"`, 'closing');
       logInfo(tag, `Closing message sent to model: ${msg}`);
     } else {
-      // אם אין OpenAI – עדיין חייבים GRACE ואז ניתוק
       const ph = pendingHangup;
       pendingHangup = null;
       scheduleForceEndAfterGrace(ph, 'no_openai');
       return;
     }
 
-    // Safety fallback: אם לא נקבל audio.done/completed, ננתק בכל מקרה אחרי GRACE
     const graceMs = getGraceMs();
     setTimeout(() => {
       if (callEnded) return;
@@ -1188,29 +1145,19 @@ wss.on('connection', (connection, req) => {
       const ph = pendingHangup;
       pendingHangup = null;
       logInfo(tag, `Closing fallback reached (${graceMs} ms), forcing end AFTER GRACE.`);
-      // ✅ ensure same GRACE mechanism is used (instead of direct endCall)
       scheduleForceEndAfterGrace(ph, 'closing_fallback');
     }, graceMs + 6000);
   }
 
   function scheduleHangupAfterBotClosing(reason) {
     if (callEnded) return;
-    if (pendingHangup) {
-      logDebug(tag, 'Hangup already scheduled, skipping bot-closing duplicate.');
-      return;
-    }
+    if (pendingHangup) return;
 
     const msg = getClosingScript();
-    pendingHangup = { reason, closingMessage: msg };
-
-    const ph = pendingHangup;
-    pendingHangup = null;
+    const ph = { reason, closingMessage: msg };
     scheduleForceEndAfterGrace(ph, 'bot_closing_detected');
 
-    logInfo(
-      tag,
-      `Bot closing detected – hangup scheduled AFTER GRACE reason="${reason}".`
-    );
+    logInfo(tag, `Bot closing detected – hangup scheduled AFTER GRACE reason="${reason}".`);
   }
 
   function checkBotClosing(botText) {
@@ -1227,16 +1174,93 @@ wss.on('connection', (connection, req) => {
     }
   }
 
+  function updateDialogueStateFromBotText(botText) {
+    const t = normalizeForClosing(botText);
+
+    // When bot asks for phone
+    if (
+      /מה מספר הטלפון|מהו מספר הטלפון|מספר טלפון לחזרה|מספר טלפון שנוח|טלפון לחזור|טלפון לחזרה/.test(t)
+    ) {
+      awaitingPhone = true;
+      awaitingPhoneConfirm = false;
+      logDebug(tag, 'State: awaitingPhone=true');
+      return;
+    }
+
+    // When bot asks for name
+    if (/איך אפשר לפנות אליך|איך אפשר לפנות אליכם|מה השם שלך|מה השם שלכם|שם פרטי|שם מלא/.test(t)) {
+      awaitingName = true;
+      logDebug(tag, 'State: awaitingName=true');
+      return;
+    }
+  }
+
+  function handleDeterministicPhoneFlowOnUserTranscript(userText) {
+    if (!openAiReady || openAiWs.readyState !== WebSocket.OPEN) return;
+
+    const phoneIL = detectPhoneCandidateFromText(userText);
+    if (!phoneIL) return;
+
+    // If we were awaiting confirmation: user says yes/no
+    if (awaitingPhoneConfirm) {
+      if (isYes(userText)) {
+        collectedPhoneIL = collectedPhoneIL || phoneIL;
+        awaitingPhoneConfirm = false;
+        awaitingPhone = false;
+
+        const sayPhone = formatIsraeliPhoneForTts(collectedPhoneIL);
+        safeCancelResponseIfNeeded();
+        sendModelPrompt(
+          `הלקוח אישר שמספר הטלפון שלו הוא "${sayPhone}". תודה קצרה ואז המשיכי לשלב הבא בצורה טבעית (למשל: בקשת שם אם חסר, או סיכום שיחזרו אליו). אל תשני את המספר ואל תחזרי לבקש אותו שוב.`,
+          'phone_confirmed'
+        );
+        return;
+      }
+      if (isNo(userText)) {
+        collectedPhoneIL = null;
+        awaitingPhoneConfirm = false;
+        awaitingPhone = true;
+
+        safeCancelResponseIfNeeded();
+        sendModelPrompt(
+          `הלקוח אמר שהמספר לא נכון. בקשי שוב מספר טלפון לחזרה, ובקשי שיאמר אותו לאט ספרה-ספרה. תשובה קצרה.`,
+          'phone_retake'
+        );
+        return;
+      }
+      // if unclear, ignore and let model continue normally
+      return;
+    }
+
+    // If bot asked for phone -> lock the number deterministically and force exact echo+confirm
+    if (awaitingPhone) {
+      collectedPhoneIL = phoneIL;
+      awaitingPhone = false;
+      awaitingPhoneConfirm = true;
+
+      const sayPhone = formatIsraeliPhoneForTts(collectedPhoneIL);
+
+      safeCancelResponseIfNeeded();
+      sendModelPrompt(
+        `הלקוח מסר מספר טלפון. המספר שנקלט (חובה לדייק ללא שינוי) הוא: "${sayPhone}". חזרי עליו בדיוק ושאלי: "זה נכון?" בלי להוסיף שום מספר אחר ובלי לשנות ספרות.`,
+        'phone_echo_confirm'
+      );
+      return;
+    }
+
+    // If not awaiting phone: still store as best effort (in case lead parsing misses)
+    if (!collectedPhoneIL) {
+      collectedPhoneIL = phoneIL;
+      logDebug(tag, 'Captured phone opportunistically', { collectedPhoneIL });
+    }
+  }
+
   function sendIdleWarningIfNeeded() {
     if (idleWarningSent || callEnded) return;
     idleWarningSent = true;
 
-    const text =
-      'אני עדיין כאן על הקו, אתם איתי? אם תרצו להמשיך, אפשר פשוט לשאול או לבקש.';
-    sendModelPrompt(
-      `תגיבי ללקוח במשפט קצר בסגנון הבא (אפשר לשנות קצת): "${text}"`,
-      'idle_warning'
-    );
+    const text = 'אני עדיין כאן על הקו, אתם איתי? אם תרצו להמשיך, אפשר פשוט לשאול או לבקש.';
+    sendModelPrompt(`תגיבי ללקוח במשפט קצר בסגנון הבא (אפשר לשנות קצת): "${text}"`, 'idle_warning');
   }
 
   // -----------------------------
@@ -1317,6 +1341,10 @@ wss.on('connection', (connection, req) => {
         if (text) {
           conversationLog.push({ from: 'bot', text });
           logInfo('Bot', text);
+
+          // ✅ update dialogue state (phone/name)
+          updateDialogueStateFromBotText(text);
+
           checkBotClosing(text);
         }
         currentBotText = '';
@@ -1346,7 +1374,6 @@ wss.on('connection', (connection, req) => {
         botSpeaking = false;
         botTurnActive = false;
 
-        // ✅ always hangup AFTER GRACE when closing finished
         if (pendingHangup && !callEnded) {
           const ph = pendingHangup;
           pendingHangup = null;
@@ -1361,7 +1388,6 @@ wss.on('connection', (connection, req) => {
         hasActiveResponse = false;
         botTurnActive = false;
 
-        // ✅ always hangup AFTER GRACE when closing finished
         if (pendingHangup && !callEnded) {
           const ph = pendingHangup;
           pendingHangup = null;
@@ -1378,7 +1404,23 @@ wss.on('connection', (connection, req) => {
           t = t.replace(/\s+/g, ' ').replace(/\s+([,.:;!?])/g, '$1');
           conversationLog.push({ from: 'user', text: t });
           logInfo('User', t);
-          userHasSpoken = true;
+
+          // ✅ deterministic phone capture + exact confirm (prevents hallucinated numbers)
+          handleDeterministicPhoneFlowOnUserTranscript(t);
+
+          // basic name capture (best effort, lightweight)
+          if (awaitingName && !collectedName) {
+            const possiblePhone = detectPhoneCandidateFromText(t);
+            if (!possiblePhone) {
+              // keep short name (first 1-3 words)
+              const words = t.split(' ').filter(Boolean).slice(0, 3);
+              const name = words.join(' ').trim();
+              if (name && name.length <= 40) {
+                collectedName = name;
+              }
+            }
+            awaitingName = false;
+          }
         }
         break;
       }
@@ -1433,14 +1475,36 @@ wss.on('connection', (connection, req) => {
     if (event === 'start') {
       streamSid = msg.start?.streamSid || null;
       callSid = msg.start?.callSid || null;
-      callerNumber = msg.start?.customParameters?.caller || null;
+
+      const cp = msg.start?.customParameters || {};
+      // ✅ FIX: caller can arrive under different keys depending on Twilio routing
+      callerNumber =
+        cp.caller ||
+        cp.From ||
+        cp.from ||
+        msg.start?.caller ||
+        msg.start?.from ||
+        null;
+
+      calledNumber = cp.called || cp.To || cp.to || msg.start?.to || null;
+      callDirection = cp.direction || msg.start?.direction || 'inbound';
+
       callStartTs = Date.now();
       lastMediaTs = Date.now();
 
-      logInfo(
-        tag,
-        `Twilio stream started. streamSid=${streamSid}, callSid=${callSid}, caller=${callerNumber}`
-      );
+      logInfo(tag, `Twilio stream started. streamSid=${streamSid}, callSid=${callSid}, caller=${callerNumber}`);
+
+      // ✅ best effort: if caller missing, fetch from Twilio ASAP (non-blocking)
+      if (!callerNumber && callSid) {
+        fetchCallerNumberFromTwilio(callSid, tag)
+          .then((resolved) => {
+            if (resolved && !callerNumber) {
+              callerNumber = resolved;
+              logInfo(tag, `Caller backfilled from Twilio API: ${callerNumber}`);
+            }
+          })
+          .catch(() => {});
+      }
 
       idleCheckInterval = setInterval(() => {
         const now = Date.now();
@@ -1457,17 +1521,11 @@ wss.on('connection', (connection, req) => {
       }, 1000);
 
       if (MB_MAX_CALL_MS > 0) {
-        if (
-          MB_MAX_WARN_BEFORE_MS > 0 &&
-          MB_MAX_CALL_MS > MB_MAX_WARN_BEFORE_MS
-        ) {
+        if (MB_MAX_WARN_BEFORE_MS > 0 && MB_MAX_CALL_MS > MB_MAX_WARN_BEFORE_MS) {
           maxCallWarningTimeout = setTimeout(() => {
             const t =
               'אנחנו מתקרבים לסיום הזמן לשיחה הזאת. אם תרצו להתקדם, אפשר עכשיו לסכם ולהשאיר פרטים.';
-            sendModelPrompt(
-              `תני ללקוח משפט קצר בסגנון הבא (אפשר לשנות קצת): "${t}"`,
-              'max_call_warning'
-            );
+            sendModelPrompt(`תני ללקוח משפט קצר בסגנון הבא (אפשר לשנות קצת): "${t}"`, 'max_call_warning');
           }, MB_MAX_CALL_MS - MB_MAX_WARN_BEFORE_MS);
         }
 
@@ -1487,20 +1545,17 @@ wss.on('connection', (connection, req) => {
 
       if (!MB_ALLOW_BARGE_IN) {
         if (botTurnActive || botSpeaking || now < noListenUntilTs) {
-          logDebug(
-            'BargeIn',
-            'Ignoring media because bot is speaking / tail (MB_ALLOW_BARGE_IN=false)',
-            { botTurnActive, botSpeaking, now, noListenUntilTs }
-          );
+          logDebug('BargeIn', 'Ignoring media because bot is speaking / tail (MB_ALLOW_BARGE_IN=false)', {
+            botTurnActive,
+            botSpeaking,
+            now,
+            noListenUntilTs
+          });
           return;
         }
       }
 
-      const oaMsg = {
-        type: 'input_audio_buffer.append',
-        audio: payload
-      };
-      openAiWs.send(JSON.stringify(oaMsg));
+      openAiWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: payload }));
     } else if (event === 'stop') {
       logInfo(tag, 'Twilio stream stopped.');
       twilioClosed = true;
@@ -1533,13 +1588,8 @@ wss.on('connection', (connection, req) => {
 server.listen(PORT, () => {
   console.log(`✅ MisterBot Realtime Voice Bot running on port ${PORT}`);
 
-  // ✅ Settings once at startup (safe)
   refreshRemoteSettings('Startup').catch(() => {});
-
-  // ריענון KB דינאמי פעם אחת בהפעלה
   refreshDynamicBusinessPrompt('Startup').catch((err) =>
     console.error('[ERROR][DynamicKB] initial load failed', err)
   );
-
-  // אין יותר setInterval – מעכשיו ריענון KB קורה רק אחרי שיחות (PostCall + Throttling)
 });
